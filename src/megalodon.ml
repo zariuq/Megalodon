@@ -67,9 +67,9 @@ let th0allsubgoals : bool ref = ref false
 let th0postsubgoals : bool ref = ref false
 let th0subgoalcnt : int ref = ref 0
 let sexprallsubgoals_inclfile : out_channel option ref = ref None
-let sexprallsubgoals : (string * string * int) option ref = ref None                                                                                                                                              
-let dumpsexpr = ref false
-let normalizepf : bool ref = ref falselet optimizepf1 : bool ref = ref false
+let sexprallsubgoals : (string * string * int) option ref = ref None
+let normalizepf : bool ref = ref false
+let optimizepf1 : bool ref = ref false
 let optimizepf2 : bool ref = ref false
 let optimizepf2tc : int ref = ref 99
 let optimizepf2pc : int ref = ref 99
@@ -4004,11 +4004,11 @@ let mgcheck c =
       if !verbosity > 59 then (Printf.printf "Main Loop Start\n"; flush stdout);
       match !proving with
       | None ->
-	            let (ditem,tr) = parse_docitem !tl in                                                                                                                                                                   
-	            tl := tr;
-	            if !dumpsexpr then Sexprexport.print_docitem ditem;
-	            evaluate_docitem ditem                                                                                                                                                                                  
-	        | Some (thmname,i,gpgtm,gphv,pfggphv) -> (*** reading a proof ***)	  let (pitem,tr) = parse_pftacitem !tl in
+	  let (ditem,tr) = parse_docitem !tl in
+	  tl := tr;
+	  evaluate_docitem ditem
+      | Some (thmname,i,gpgtm,gphv,pfggphv) -> (*** reading a proof ***)
+	  let (pitem,tr) = parse_pftacitem !tl in
 	  tl := tr;
 	  evaluate_pftac pitem thmname i gpgtm gphv pfggphv
     done
@@ -4521,13 +4521,7 @@ let _ =
           end
         else if Sys.argv.(!j) = "-sexprinfo" then
           begin
-            incr j;
             sexprinfo := true
-          end
-        else if Sys.argv.(!j) = "-dump-sexpr" then
-          begin
-            incr j;
-            dumpsexpr := true
           end
         else if Sys.argv.(!j) = "-reportbushydeps" then
           begin
@@ -4572,13 +4566,13 @@ let _ =
           end
         else if Sys.argv.(!j) = "-sexprallsubgoals" then
           begin
-            if !j < i-2 then
-              begin
-                incr j;
+	    if !j < i-2 then
+	      begin
+		incr j;
                 sexprallsubgoals := Some(Sys.argv.(!j),"",0)
-              end
-            else
-              raise (Failure("Expected -sexprallsubgoals <fileprefix>"))
+	      end
+	    else
+	      raise (Failure("Expected -sexprallsubgoals <fileprefix>"))
           end
 	else if Sys.argv.(!j) = "-s" then
 	  begin
