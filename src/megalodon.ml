@@ -1,16 +1,21 @@
-(* Copyright (c) 2020-2023 CIIRC (Czech Institute of Informatics, Robotics and Cybernetics) / CTU (Czech Technical University) *)
+(* Copyright (c) 2020-2025 CIIRC (Czech Institute of Informatics, Robotics and Cybernetics) / CTU (Czech Technical University) *)
 
 open Syntax
 open Parser
 open Megaauto
 open Interpret
 
+let mycnt = ref 0;;
 let doublecheckpf = ref true;;
+let createabyprobs = ref false;;
+let sb : Buffer.t = Buffer.create 10000;;
 let bushy = ref false;;
 let bushykdeps : (string,unit) Hashtbl.t = Hashtbl.create 10;;
 let bushyhdeps : (int,unit) Hashtbl.t = Hashtbl.create 10;;
 let fofskip : (string,unit) Hashtbl.t = Hashtbl.create 10;;
 let th0skip : (string,unit) Hashtbl.t = Hashtbl.create 10;;
+let usedknowns : (string,unit) Hashtbl.t = Hashtbl.create 10;;
+let usedhyps : (int,unit) Hashtbl.t = Hashtbl.create 10;;
 Hashtbl.add th0skip "5867641425602c707eaecd5be95229f6fd709c9b58d50af108dfe27cb49ac069" ();;
 Hashtbl.add th0skip "5bf697cb0d1cdefbe881504469f6c48cc388994115b82514dfc4fb5e67ac1a87" ();;
 Hashtbl.add th0skip "058f630dd89cad5a22daa56e097e3bdf85ce16ebd3dbf7994e404e2a98800f7f" ();;
@@ -52,14 +57,19 @@ Hashtbl.add fofskip "bfd151f806ea28dc7a1dc0837502b7ceb6f8c9d6f8ca53206a01a29e23c
 Hashtbl.add fofskip "5a4bbc1e6228cfca5f449799d8b79de665c1a48f3d2119d65f9309c4242d2cf7" ();;
 
 let fof : string option ref = ref None
+let fofallsubgoals : bool ref = ref false
+let fofpostsubgoals : bool ref = ref false
+let fofsubgoalcnt : int ref = ref 0
 let th0 : string option ref = ref None
 let th0ps1 : bool ref = ref false
+let th0singlesubgoal : (int * int) option ref = ref None
 let th0allsubgoals : bool ref = ref false
+let th0postsubgoals : bool ref = ref false
 let th0subgoalcnt : int ref = ref 0
 let sexprallsubgoals_inclfile : out_channel option ref = ref None
-let sexprallsubgoals : (string * string * int) option ref = ref None
-let normalizepf : bool ref = ref false
-let optimizepf1 : bool ref = ref false
+let sexprallsubgoals : (string * string * int) option ref = ref None                                                                                                                                              
+let dumpsexpr = ref false
+let normalizepf : bool ref = ref falselet optimizepf1 : bool ref = ref false
 let optimizepf2 : bool ref = ref false
 let optimizepf2tc : int ref = ref 99
 let optimizepf2pc : int ref = ref 99
@@ -113,6 +123,24 @@ let th0sgps1 = ref []
 let fofp () = not (!fof = None)
 let th0p () = not (!th0 = None)
 
+let read_aby_script fn =
+  let f = open_in fn in
+  let rl = ref [] in
+  try
+    while true do
+      let l = input_line f in
+      if String.length l > 4 then
+        let prefix = String.sub l 0 4 in
+        if prefix = "th0:" then
+          rl := (2,String.sub l 4 (String.length l - 4))::!rl
+        else if prefix = "fof:" then
+          rl := (1,String.sub l 4 (String.length l - 4))::!rl
+    done;
+    raise End_of_file
+  with End_of_file ->
+        close_in f;
+        List.rev !rl
+
 let rec tptpizecxtm cxtm =
   match cxtm with
   | [] -> []
@@ -122,14 +150,14 @@ let rec tptpizecxtm cxtm =
 let admitpfstateatp pfst =
   if !pfgtheory = Egal then
     match pfst with
-    | PfStateGoal(atm,cxtm,cxpf) ->
+    | PfStateGoal(startpos,atm,cxtm,cxpf) ->
        begin
          begin
            match !fof with
-           | Some(c) ->
+           | Some(c) when not !createabyprobs ->
               begin
                 try
-                  let z = fof_prop_str atm (tptpizecxtm cxtm) in (** only if the conclusion is FO **)
+                  let z = fof_prop_str atm (tptpizecxtm cxtm) 0 in (** only if the conclusion is FO **)
                   let n = getadmitnumlineno() in
                   let fn =
                     if n = 0 then
@@ -145,12 +173,12 @@ let admitpfstateatp pfst =
                   in
                   let ch = open_out fn in
                   List.iter
-                    (fun a -> Printf.fprintf ch "%s\n" a)
+                    (fun (_,_,_,a) -> Printf.fprintf ch "%s\n" a)
                     (List.rev !fofsg);
                   List.iter
                     (fun (x,p) ->
                       try
-                        let a = fof_prop_str p (tptpizecxtm cxtm) in
+                        let a = fof_prop_str p (tptpizecxtm cxtm) 0 in
                         Printf.fprintf ch "fof(%s,axiom,%s).\n" (tptpize_name x) a
                       with NotFO -> ())
                     (List.rev cxpf);
@@ -158,11 +186,11 @@ let admitpfstateatp pfst =
                   close_out ch
                 with NotFO -> ()
               end
-           | None -> ()
+           | _ -> ()
          end;
          begin
            match !th0 with
-           | Some(c) ->
+           | Some(c) when not !createabyprobs && !th0singlesubgoal = None ->
               begin
                 let n = getadmitnumlineno() in
                 let fn =
@@ -240,7 +268,7 @@ let admitpfstateatp pfst =
                   begin
                     let ch = open_out fn in
                     List.iter
-                      (fun a -> Printf.fprintf ch "%s\n" a)
+                      (fun (_,_,_,a) -> Printf.fprintf ch "%s\n" a)
                       (List.rev !th0sg);
                     let rec th0_cx cxtm =
                       match cxtm with
@@ -266,7 +294,7 @@ let admitpfstateatp pfst =
                     close_out ch
                   end
               end
-           | None -> ()
+           | _ -> ()
          end;
        end
     | _ -> ()
@@ -371,6 +399,7 @@ let includingsigfile = ref false;;
 let includedsigfiles = ref [];;
 let sigoutfile = ref None;;
 let pfgout = ref false;;
+let pfgsummary = ref false;;
 type pfgitem = PfgParam of string * string * tp | PfgDef of string * string * tp * tm | PfgKnown of string * string * tm | PfgThm of string * string * tm * pf | PfgConj of string * string * tm
 let pfgmain : pfgitem list ref = ref [];;
 let pfgdelta : (string,unit) Hashtbl.t = Hashtbl.create 100;;
@@ -1079,7 +1108,15 @@ let evaluate_docitem_1 ditem =
       end
   | ParamHash(x,h,ok) ->
       if (!verbosity > 9) then (Printf.printf "ParamHash %s %s\n" x h; flush stdout);
+      if !pfgtheory = SetMM && (x = "wi" || x = "wal") then raise (Failure (Printf.sprintf "%s is a reserved built-in name for SetMM" x));
       begin
+        if !pfgtheory = HF then
+          begin
+            try
+              let n = Hashtbl.find pfghfprim h in
+              Hashtbl.add pfghfanchor x (Printf.sprintf "p%d" n)
+            with Not_found -> ()
+          end;
 	try
 	  let (xj,(xi,_)) = primname x in
 	  let xh = ptm_lam_id (xi,Prim xj) sigtmof sigdelta in
@@ -1094,6 +1131,7 @@ let evaluate_docitem_1 ditem =
       end
   | ParamDecl(x,a) ->
       if !reporteachitem then (Printf.printf "++ %s\n" x; flush stdout);
+      if !pfgtheory = SetMM && (x = "wi" || x = "wal") then raise (Failure (Printf.sprintf "%s is a reserved built-in name for SetMM" x));
       let a = ltree_to_atree a in
       if List.mem_assoc x !sigtm || List.mem_assoc x !sigpf || List.mem x !ctxtp || List.mem_assoc x !ctxtm || List.mem_assoc x !ctxpf then
 	raise (Failure(x ^ " has already been used."));
@@ -1108,10 +1146,17 @@ let evaluate_docitem_1 ditem =
 	  if (xi,xtp) <> (i,agtp) then raise (Failure(x ^ " is the name of a built-in primitive which does not have the given type."));
 	  if i > 6 then raise (Failure("It is forbidden to have more than 6 type variables."));
 	  let xhv = tm_id (Prim(xj)) sigtmof sigdelta in
-          if !sexprinfo then Printf.printf "(PRIM %d \"%s\" \"%s\" %s)\n" xj x xhv (tp_to_sexpr agtp);
+          if !sexprinfo then Printf.printf "(PRIM %d \"%s\" \"%s\" %s %d)\n" xj x xhv (tp_to_sexpr agtp) !lineno;
 	  if x = "Empty" then set0 := Some(xhv);
 	  add_sigdelta xhv (0,Prim(xj));
 	  if !pfgtheory = Egal then megaauto_set_item xhv false;
+          if !pfgtheory = SetMM then (** I'm not sure why every theory isn't treated this way. **)
+            begin
+              let (pure,pfghv) = pfg_objid (Prim(xj)) agtp in
+              Hashtbl.add pfgtmhh xhv pure;
+              Hashtbl.add pfgtmroot x (Hash.hashval_hexstring pure);
+              Hashtbl.add pfgobjid x (Hash.hashval_hexstring pfghv);
+            end;
           if fofp() && i = 0 && not (Hashtbl.mem fofskip xhv) then Hashtbl.add tptp_id_name xhv (tptpize_name x,agtp);
           if th0p() && i = 0 && not (Hashtbl.mem th0skip xhv) then
             begin
@@ -1119,13 +1164,13 @@ let evaluate_docitem_1 ditem =
               if !th0ps1 then
                 th0sgps1 := (None,Printf.sprintf "thf(%s,type,(%s : %s)). %% %s" (tptpize_name x) (tptpize_name x) (th0_stp_str agtp) xhv)::!th0sgps1
               else
-                th0sg := Printf.sprintf "thf(%s,type,(%s : %s)). %% %s" (tptpize_name x) (tptpize_name x) (th0_stp_str agtp) xhv::!th0sg
+                th0sg := ("type","",x,Printf.sprintf "thf(%s,type,(%s : %s)). %% %s" (tptpize_name x) (tptpize_name x) (th0_stp_str agtp) xhv)::!th0sg
             end;
           begin
             match !sexprallsubgoals_inclfile with
             | None -> ()
             | Some(f) ->
-               Printf.fprintf f "(PRIM %d \"%s\" \"%s\" %s)\n" xj x xhv (tp_to_sexpr agtp)
+               Printf.fprintf f "(PRIM %d \"%s\" \"%s\" %s %d)\n" xj x xhv (tp_to_sexpr agtp) !lineno
           end;
 	  begin
 	    if !sqlout then
@@ -1161,7 +1206,7 @@ let evaluate_docitem_1 ditem =
 	    else
 	      try
 		let xhv = Hashtbl.find sigtmh x in
-                if !sexprinfo then Printf.printf "(PARAM \"%s\" \"%s\" %d %s)\n" x xhv i (tp_to_sexpr agtp);
+                if !sexprinfo then Printf.printf "(PARAM \"%s\" \"%s\" %d %s %d)\n" x xhv i (tp_to_sexpr agtp) !lineno;
 		if !pfgtheory = Egal then megaauto_set_item xhv false;
                 if !pfgtheory = Egal && xhv = "7a7fd30507c2156eeace3d2784ada104fee81316a9d6f02db384ad7f0a180e26" then seqcons := Some(xhv);
                 if fofp() && i = 0 && not (Hashtbl.mem fofskip xhv) then Hashtbl.add tptp_id_name xhv (tptpize_name x,agtp);
@@ -1171,7 +1216,7 @@ let evaluate_docitem_1 ditem =
                     if !th0ps1 then
                       th0sgps1 := (None,Printf.sprintf "thf(%s,type,(%s : %s)). %% %s" (tptpize_name x) (tptpize_name x) (th0_stp_str agtp) xhv)::!th0sgps1
                     else
-                      th0sg := Printf.sprintf "thf(%s,type,(%s : %s)). %% %s" (tptpize_name x) (tptpize_name x) (th0_stp_str agtp) xhv::!th0sg;
+                      th0sg := ("type","",x,Printf.sprintf "thf(%s,type,(%s : %s)). %% %s" (tptpize_name x) (tptpize_name x) (th0_stp_str agtp) xhv)::!th0sg;
                   end;
                 begin
                   match !sexprallsubgoals_inclfile with
@@ -1216,14 +1261,18 @@ let evaluate_docitem_1 ditem =
                        if i > 0 then raise Not_found;
                        let pfghpure = Hashtbl.find pfgtmhh xhv in
                        let pfghthy = pfg_objid_pure_to_thy pfghpure agtp in
-                       if not (Hashtbl.mem ownedobj pfghthy) then raise Not_found; (** proofgold knows it **)
+                       if !pfgsummary then Printf.printf "Param:%s:%s:%s\n" x (Hash.hashval_hexstring pfghpure) (Hash.hashval_hexstring pfghthy);
+                       Hashtbl.add pfgtmroot x (Hash.hashval_hexstring pfghpure);
+                       Hashtbl.add pfgobjid x (Hash.hashval_hexstring pfghthy);
+                       (*                       if not (Hashtbl.mem ownedobj pfghthy) then raise Not_found; (** proofgold knows it **) *)
 		       Hashtbl.add sigtmof xhv (i,agtp);
 		       let m = TmH xhv in
 		       sigtm := (x,!aptmloc m)::!sigtm;
 		       secstack := List.map (fun (y,f,atl,apl,st,sp) -> (y,f,atl,apl,(x,atl m)::st,sp)) !secstack
 		     with
                      | Not_found ->
-		        raise (Failure("The given id " ^ xhv ^ " for " ^ x ^ " is not a known index for a term."))
+                        ()
+                          (*		        raise (Failure("The given id " ^ xhv ^ " for " ^ x ^ " is not a known index for a term.")) *)
 		end
    	      with Not_found ->
 		raise (Failure("Unknown id for " ^ x))
@@ -1231,6 +1280,7 @@ let evaluate_docitem_1 ditem =
       end
   | DefDecl(x,None,b) ->
       if !reporteachitem then (Printf.printf "++ %s\n" x; flush stdout);
+      if !pfgtheory = SetMM && (x = "wi" || x = "wal") then raise (Failure (Printf.sprintf "%s is a reserved built-in name for SetMM" x));
       let b = ltree_to_atree b in
       if List.mem_assoc x !sigtm || List.mem_assoc x !sigpf || List.mem x !ctxtp || List.mem_assoc x !ctxtm || List.mem_assoc x !ctxpf then
 	raise (Failure(x ^ " has already been used."))
@@ -1249,7 +1299,7 @@ let evaluate_docitem_1 ditem =
             begin
               try
                 Hashtbl.add tptp_id_name xhv (tptpize_name x,bgtp);
-                fofsg := Printf.sprintf "fof(%s,axiom,%s). %% %s" (tptpize_name x) (fof_def_str bgtp xhv bgtm) xhv::!fofsg;
+                fofsg := ("def",xhv,x,Printf.sprintf "fof(%s,axiom,%s). %% %s" (tptpize_name x) (fof_def_str bgtp xhv bgtm) xhv)::!fofsg;
               with NotFO -> ()
             end;
           if th0p() && i = 0 && not (Hashtbl.mem th0skip xhv) then
@@ -1263,22 +1313,25 @@ let evaluate_docitem_1 ditem =
                 end
               else
                 begin
-                  th0sg := Printf.sprintf "thf(%s,type,(%s : %s))." (tptpize_name x) (tptpize_name x) (th0_stp_str bgtp)::!th0sg;
-                  th0sg := Printf.sprintf "thf(%s_def,definition,%s). %% %s" (tptpize_name x) (th0_def_str bgtp xhv bgtm) xhv::!th0sg
+                  th0sg := ("type","",x,Printf.sprintf "thf(%s,type,(%s : %s))." (tptpize_name x) (tptpize_name x) (th0_stp_str bgtp))::!th0sg;
+                  th0sg := ("def",xhv,x,Printf.sprintf "thf(%s_def,definition,%s). %% %s" (tptpize_name x) (th0_def_str bgtp xhv bgtm) xhv)::!th0sg
                 end
             end;
-          if !sexprinfo then Printf.printf "(DEF \"%s\" \"%s\" %d %s %s)\n" x xhv i (tp_to_sexpr bgtp) (tm_to_sexpr bgtm);
+          if !sexprinfo then Printf.printf "(DEF \"%s\" \"%s\" %d %s %s %d)\n" x xhv i (tp_to_sexpr bgtp) (tm_to_sexpr bgtm) !lineno;
           begin
             match !sexprallsubgoals_inclfile with
             | None -> ()
             | Some(f) ->
-               Printf.fprintf f "(DEF \"%s\" \"%s\" %d %s %s)\n" x xhv i (tp_to_sexpr bgtp) (tm_to_sexpr bgtm)
+               Printf.fprintf f "(DEF \"%s\" \"%s\" %d %s %s %d)\n" x xhv i (tp_to_sexpr bgtp) (tm_to_sexpr bgtm) !lineno
           end;
           if !verbosity > 5 then Printf.printf "(MGID \"%s\" \"%s\")\n" x xhv;
           begin
             if i = 0 then
               let (pure,pfghv) = pfg_objid bgtm bgtp in
-              if !includingsigfile && not (Hashtbl.mem ownedobj pfghv) then Printf.printf "WARNING: The pfg id %s for the object %s is not owned.\n" (Hash.hashval_hexstring pfghv) x;
+              (*              if !includingsigfile && not (Hashtbl.mem ownedobj pfghv) then Printf.printf "WARNING: The pfg id %s for the object %s is not owned.\n" (Hash.hashval_hexstring pfghv) x; *)
+              if !pfgsummary then Printf.printf "Def:%s:%s:%s\n" x (Hash.hashval_hexstring pure) (Hash.hashval_hexstring pfghv);
+              Hashtbl.add pfgtmroot x (Hash.hashval_hexstring pure);
+              Hashtbl.add pfgobjid x (Hash.hashval_hexstring pfghv);
 	      if (!verbosity > 3) then (Printf.printf "%s was assigned pfg obj pure id %s and theory id %s\n" x (Hash.hashval_hexstring pure) (Hash.hashval_hexstring pfghv); flush stdout);
               Hashtbl.add ownedobj pfghv ();
               if (!verbosity > 3) then (Printf.printf "(* Parameter %s \"%s\" \"%s\" *)\n" x xhv (Hash.hashval_hexstring pure));
@@ -1334,6 +1387,7 @@ let evaluate_docitem_1 ditem =
 	end
   | DefDecl(x,Some a,b) ->
       if !reporteachitem then (Printf.printf "++ %s\n" x; flush stdout);
+      if !pfgtheory = SetMM && (x = "wi" || x = "wal") then raise (Failure (Printf.sprintf "%s is a reserved built-in name for SetMM" x));
       let a = ltree_to_atree a in
       let b = ltree_to_atree b in
       if List.mem_assoc x !sigtm || List.mem_assoc x !sigpf || List.mem x !ctxtp || List.mem_assoc x !ctxtm || List.mem_assoc x !ctxpf then
@@ -1354,7 +1408,7 @@ let evaluate_docitem_1 ditem =
             begin
               try
                 Hashtbl.add tptp_id_name xhv (tptpize_name x,agtp);
-                fofsg := Printf.sprintf "fof(%s,axiom,%s). %% %s" (tptpize_name x) (fof_def_str agtp xhv bgtm) xhv::!fofsg;
+                fofsg := ("def",xhv,x,Printf.sprintf "fof(%s,axiom,%s). %% %s" (tptpize_name x) (fof_def_str agtp xhv bgtm) xhv)::!fofsg;
               with NotFO -> ()
             end;
           if th0p() && i = 0 && not (Hashtbl.mem th0skip xhv) then
@@ -1368,22 +1422,25 @@ let evaluate_docitem_1 ditem =
                 end
               else
                 begin
-                  th0sg := Printf.sprintf "thf(%s,type,(%s : %s))." (tptpize_name x) (tptpize_name x) (th0_stp_str agtp)::!th0sg;
-                  th0sg := Printf.sprintf "thf(%s_def,definition,%s). %% %s" (tptpize_name x) (th0_def_str agtp xhv bgtm) xhv::!th0sg;
+                  th0sg := ("type","",x,Printf.sprintf "thf(%s,type,(%s : %s))." (tptpize_name x) (tptpize_name x) (th0_stp_str agtp))::!th0sg;
+                  th0sg := ("def",xhv,x,Printf.sprintf "thf(%s_def,definition,%s). %% %s" (tptpize_name x) (th0_def_str agtp xhv bgtm) xhv)::!th0sg;
                 end
             end;
-          if !sexprinfo then Printf.printf "(DEF \"%s\" \"%s\" %d %s %s)\n" x xhv i (tp_to_sexpr agtp) (tm_to_sexpr bgtm);
+          if !sexprinfo then Printf.printf "(DEF \"%s\" \"%s\" %d %s %s %d)\n" x xhv i (tp_to_sexpr agtp) (tm_to_sexpr bgtm) !lineno;
           begin
             match !sexprallsubgoals_inclfile with
             | None -> ()
             | Some(f) ->
-               Printf.fprintf f "(DEF \"%s\" \"%s\" %d %s %s)\n" x xhv i (tp_to_sexpr agtp) (tm_to_sexpr bgtm)
+               Printf.fprintf f "(DEF \"%s\" \"%s\" %d %s %s %d)\n" x xhv i (tp_to_sexpr agtp) (tm_to_sexpr bgtm) !lineno
           end;
           if !verbosity > 5 then Printf.printf "(MGID \"%s\" \"%s\")\n" x xhv;
           begin
             if i = 0 then
               let (pure,pfghv) = pfg_objid bgtm agtp in
-              if !includingsigfile && not (Hashtbl.mem ownedobj pfghv) then Printf.printf "WARNING: The pfg id %s for the object %s is not owned.\n" (Hash.hashval_hexstring pfghv) x;
+              (*              if !includingsigfile && not (Hashtbl.mem ownedobj pfghv) then Printf.printf "WARNING: The pfg id %s for the object %s is not owned.\n" (Hash.hashval_hexstring pfghv) x; *)
+              if !pfgsummary then Printf.printf "Def:%s:%s:%s\n" x (Hash.hashval_hexstring pure) (Hash.hashval_hexstring pfghv);
+              Hashtbl.add pfgtmroot x (Hash.hashval_hexstring pure);
+              Hashtbl.add pfgobjid x (Hash.hashval_hexstring pfghv);
 	      if (!verbosity > 3) then (Printf.printf "%s was assigned pfg obj id %s\n" x (Hash.hashval_hexstring pfghv); flush stdout);
               Hashtbl.add ownedobj pfghv ();
               if (!verbosity > 3) then (Printf.printf "(* Parameter %s \"%s\" \"%s\" *)\n" x xhv (Hash.hashval_hexstring pure));
@@ -1446,22 +1503,29 @@ let evaluate_docitem_1 ditem =
       let atm = check_tm a Prop !polytm sigtmof !sigtm !ctxtp !ctxtm in
       let agtm = !tmallclos atm in
       let ahv = ptm_all_id (i,agtm) sigtmof sigdelta in
+      if !pfgtheory = HF then
+        begin
+          try
+            let n = Hashtbl.find pfghfaxnum ahv in
+            Hashtbl.add pfghfanchor x (Printf.sprintf "a%d" n)
+          with Not_found -> ()
+        end;
       if !pfgtheory = Egal then megaauto_set_known ahv;
-      if fofp() && i = 0 && not (Hashtbl.mem fofskip ahv) then (try fofsg := Printf.sprintf "fof(%s,axiom,%s). %% %s" (tptpize_name x) (fof_prop_str agtm []) ahv::!fofsg with NotFO -> ());
+      if fofp() && i = 0 && not (Hashtbl.mem fofskip ahv) then (try fofsg := ("known",ahv,x,Printf.sprintf "fof(%s,axiom,%s). %% %s" (tptpize_name x) (fof_prop_str agtm [] 0) ahv)::!fofsg with NotFO -> ());
       if th0p() && i = 0 && not (Hashtbl.mem th0skip ahv) then
         begin
           if not !bushy || Hashtbl.mem bushykdeps ahv then
             if !th0ps1 then
               th0sgps1 := (Some(tm_deps agtm),Printf.sprintf "thf(%s,axiom,%s). %% %s" (tptpize_name x) (th0_str agtm []) ahv)::!th0sgps1
             else
-              th0sg := Printf.sprintf "thf(%s,axiom,%s). %% %s" (tptpize_name x) (th0_str agtm []) ahv::!th0sg
+              th0sg := ("known",ahv,x,Printf.sprintf "thf(%s,axiom,%s). %% %s" (tptpize_name x) (th0_str agtm []) ahv)::!th0sg
         end;
-      if !sexprinfo then Printf.printf "(AXIOM \"%s\" \"%s\" %d %s)\n" x ahv i (tm_to_sexpr agtm);
+      if !sexprinfo then Printf.printf "(AXIOM \"%s\" \"%s\" %d %s %d)\n" x ahv i (tm_to_sexpr agtm) !lineno;
       begin
         match !sexprallsubgoals_inclfile with
         | None -> ()
         | Some(f) ->
-           Printf.fprintf f "(AXIOM \"%s\" \"%s\" %d %s)\n" x ahv i (tm_to_sexpr agtm)
+           Printf.fprintf f "(AXIOM \"%s\" \"%s\" %d %s %d)\n" x ahv i (tm_to_sexpr agtm) !lineno
       end;
       if !verbosity > 5 then Printf.printf "(MGPROPID \"%s\" \"%s\")\n" x ahv;
       add_sigdelta ahv (i,agtm);
@@ -1487,6 +1551,15 @@ let evaluate_docitem_1 ditem =
       sigpf := (x,!appfloc (Known(ahv)))::!sigpf;
       if i > 0 then (*** x will look polymorphic with i types after the appropriate section is ended ***)
 	pushpolypf ((x,i),agtm);
+      if i = 0 then
+        begin
+          let (pfgpure,pfgahv) = pfg_propid2 agtm in
+          Hashtbl.add pfgtmroot x (Hash.hashval_hexstring pfgpure);
+          Hashtbl.add pfgpropid x (Hash.hashval_hexstring pfgahv);
+          if !pfgsummary then
+            Printf.printf "Known:%s:%s:%s\n" x (Hash.hashval_hexstring pfgpure) (Hash.hashval_hexstring pfgahv);
+        end;
+      (*
       if not (Hashtbl.mem indexknowns ahv) &&
            begin
              if i = 0 then
@@ -1498,12 +1571,13 @@ let evaluate_docitem_1 ditem =
       then
         begin
           Printf.printf "WARNING: The id %s for the proposition for axiom %s [pfg %s] is not indexed as previously known.\n" ahv x (Hash.hashval_hexstring (pfg_propid agtm));
-        end;
+        end; *)
       Hashtbl.add indexknowns ahv ();
       secstack := List.map (fun (y,f,atl,apl,st,sp) -> (y,f,atl,apl,st,(x,apl (Known(ahv)))::sp)) !secstack;
       if (!verbosity > 3) then (Printf.printf "Proposition of Axiom %s : %s was assigned id %s\n" x (tm_to_str agtm) ahv; flush stdout);
       ()
   | ThmDecl(c,x,a) ->
+      if !pfgtheory = SetMM && (x = "wi" || x = "wal") then raise (Failure (Printf.sprintf "%s is a reserved built-in name for SetMM" x));
       let a = ltree_to_atree a in
       if List.mem_assoc x !sigtm || List.mem_assoc x !sigpf || List.mem x !ctxtp || List.mem_assoc x !ctxtm || List.mem_assoc x !ctxpf then
 	raise (Failure(x ^ " has already been used."));
@@ -1514,9 +1588,17 @@ let evaluate_docitem_1 ditem =
       let ahv = ptm_all_id (i,agtm) sigtmof sigdelta in
       if !verbosity > 5 then Printf.printf "(MGPROPID \"%s\" \"%s\")\n" x ahv;
       let pfgahv = pfg_propid agtm in
-      if !verbosity > 5 && (Hashtbl.mem indexknowns ahv || Hashtbl.mem ownedprop pfgahv) then (Printf.printf "Warning: The id %s for the proposition for theorem %s is already known.\n" ahv x; flush stdout);
+      (*      if !verbosity > 5 && (Hashtbl.mem indexknowns ahv || Hashtbl.mem ownedprop pfgahv) then (Printf.printf "Warning: The id %s for the proposition for theorem %s is already known.\n" ahv x; flush stdout); *)
       Hashtbl.add sigknh x ahv;
       Hashtbl.add ownedprop pfgahv ();
+      if i = 0 && (!pfgsummary || not (!html = None)) then
+        begin
+          let (pfgpure,pfgahv) = pfg_propid2 agtm in
+          Hashtbl.add pfgtmroot x (Hash.hashval_hexstring pfgpure);
+          Hashtbl.add pfgpropid x (Hash.hashval_hexstring pfgahv);
+          if !pfgsummary then
+            Printf.printf "Thm:%s:%s:%s\n" x (Hash.hashval_hexstring pfgpure) (Hash.hashval_hexstring pfgahv);
+        end;
       add_sigdelta ahv (i,agtm);
       if !reporteachitem then (Printf.printf "++ %s\nHASH %s\n" x ahv; flush stdout);
       if !sqlout then
@@ -1532,7 +1614,7 @@ let evaluate_docitem_1 ditem =
 	  | None -> ()
 	end;
       if (!verbosity > 3) then (Printf.printf "Proposition of %s %s : %s was assigned id %s\n" c x (tm_to_str agtm) ahv; flush stdout);
-      if !sexprinfo then Printf.printf "(THM \"%s\" \"%s\" \"%s\" %d %s)\n" x ahv (Hash.hashval_hexstring pfgahv) i (tm_to_sexpr agtm);
+      if !sexprinfo then Printf.printf "(THM \"%s\" \"%s\" \"%s\" %d %s %d)\n" x ahv (Hash.hashval_hexstring pfgahv) i (tm_to_sexpr agtm) !lineno;
       begin
         match !sexprallsubgoals_inclfile with
         | None -> ()
@@ -1541,8 +1623,118 @@ let evaluate_docitem_1 ditem =
       let currpflamclos = !pflamclos in
       deltaset := [];
       proving := Some (x,i,agtm,ahv,pfgahv);
-      prooffun := (fun dl -> match dl with [d] -> currpflamclos d | _ -> raise (Failure("Bug with proof construction")));
-      pfstate := [PfStateGoal(atm,!ctxtm,!ctxpf)];
+      begin
+        if !fofpostsubgoals && fofp() then
+          let cxtm = !ctxtm in
+          let cxpf = !ctxpf in
+          let (startlineno,startcharno) = (!lineno,!charno) in
+          prooffun :=
+            (fun dl ->
+              match dl with
+                [(endpos,d)] ->
+                begin
+                  match !fof with
+                  | Some(c) ->
+                     begin
+                       match endpos with
+                       | None -> Printf.printf "Do not know end pos of top level %d %d\n" !lineno !charno
+                       | Some(endlineno,endcharno) ->
+                          try
+                            Hashtbl.clear usedknowns;
+                            Hashtbl.clear usedhyps;
+                            pf_used d 0 usedknowns usedhyps;
+                            let z = fof_prop_str atm (tptpizecxtm cxtm) 0 in (** only if the conclusion is FO **)
+                            let fn =
+                              Printf.sprintf "%s.sl%d.sc%d.el%d.ec%d.top.fof.p" c startlineno startcharno endlineno endcharno
+                            in
+                            let conjn =
+                              Printf.sprintf "%s_%d_%d_%d_%d" c startlineno startcharno endlineno endcharno
+                            in
+                            let ch = open_out fn in
+                            List.iter
+                              (fun (cl,h,_,a) ->
+                                if cl = "type" || cl = "def" && not (Hashtbl.mem sigdelta_opaque h) || cl = "known" && Hashtbl.mem usedknowns h then
+                                  Printf.fprintf ch "%s\n" a)
+                              (List.rev !fofsg);
+                            let hypcnt = ref (-1) in
+                            List.iter
+                              (fun (x,p) ->
+                                try
+                                  incr hypcnt;
+                                  if Hashtbl.mem usedhyps !hypcnt then
+                                    let a = fof_prop_str p (tptpizecxtm cxtm) 0 in
+                                    Printf.fprintf ch "fof(%s,axiom,%s).\n" (tptpize_name x) a
+                                with NotFO -> ())
+                              cxpf;
+                            Printf.fprintf ch "fof(conj_%s,conjecture,%s).\n" conjn z;
+                            close_out ch
+                          with NotFO -> ()
+                     end
+                  | None -> ()
+                end;
+                currpflamclos d
+              | _ -> raise (Failure("Bug with proof construction")))
+        else if !th0postsubgoals && th0p () then
+          let cxtm = !ctxtm in
+          let cxpf = !ctxpf in
+          let (startlineno,startcharno) = (!lineno,!charno) in
+          prooffun :=
+            (fun dl ->
+              match dl with
+                [(endpos,d)] ->
+                 begin
+                   match !th0 with
+                   | Some(c) ->
+                      begin
+                        match endpos with
+                        | None -> Printf.printf "Do not know end pos of top level %d %d" !lineno !charno
+                        | Some(endlineno,endcharno) ->
+                           Hashtbl.clear usedknowns;
+                           Hashtbl.clear usedhyps;
+                           pf_used d 0 usedknowns usedhyps;
+                           let fn =
+                             Printf.sprintf "%s.sl%d.sc%d.el%d.ec%d.top.th0.p" c startlineno startcharno endlineno endcharno
+                           in
+                           let conjn =
+                             Printf.sprintf "%s_%d_%d_%d_%d" c startlineno startcharno endlineno endcharno
+                           in
+                           let ch = open_out fn in
+                           List.iter
+                             (fun (cl,h,_,a) ->
+                               if cl = "type" || cl = "def" && not (Hashtbl.mem sigdelta_opaque h) || cl = "known" && Hashtbl.mem usedknowns h then
+                                 Printf.fprintf ch "%s\n" a)
+                             (List.rev !th0sg);
+                           let rec th0_cx cxtm =
+                             match cxtm with
+                             | [] -> ()
+                             | (x,(a,d))::cxtmr ->
+                                th0_cx cxtmr;
+                                Printf.fprintf ch "thf(%s_tp,type,(%s : %s)).\n" (tptpize_name x) (tptpize_name x) (th0_stp_str a);
+                                match d with
+                                | Some(d) ->
+                                   Printf.fprintf ch "thf(%s_def,definition,(%s = %s)).\n" (tptpize_name x) (tptpize_name x) (th0_str d (tptpizecxtm cxtmr))
+                                | None -> ()
+                           in
+                           th0_cx cxtm;
+                           let hypcnt = ref (-1) in
+                           List.iter
+                             (fun (x,p) ->
+                               incr hypcnt;
+                               if Hashtbl.mem usedhyps !hypcnt then
+                                 let a = th0_str p (tptpizecxtm cxtm) in
+                                 Printf.fprintf ch "thf(%s,axiom,%s).\n" (tptpize_name x) a)
+                             cxpf;
+                           Printf.fprintf ch "thf(conj_%s,conjecture,%s).\n" conjn (th0_str atm (tptpizecxtm cxtm));
+                           close_out ch
+                      end
+                   | None -> ()
+                 end;
+                 currpflamclos d
+              | _ -> raise (Failure("Bug with proof construction")))
+        else
+          prooffun := (fun dl -> match dl with [(_,d)] -> currpflamclos d | _ -> raise (Failure("Bug with proof construction")))
+      end;
+      pfstate := [PfStateGoal(Some(!lineno,!charno),atm,!ctxtm,!ctxpf)];
       laststructaction := -1
 
 let evaluate_docitem ditem =
@@ -1551,7 +1743,7 @@ let evaluate_docitem ditem =
     match !html with
     | Some hc ->
        begin
-	 output_docitem_html hc ditem sigtmh sigknh;
+	 output_docitem_html ((List.map (fun (x,_) -> x) !ctxpf) @ (List.map (fun (x,_) -> x) !ctxtm) @ !ctxtp) hc ditem sigtmh sigknh;
 	 match ditem with
 	 | ThmDecl(_,x,_) ->
 	    begin
@@ -1608,10 +1800,41 @@ let evaluate_docitem ditem =
       end
   | None -> ()
 
+let max_pos (line1,char1) (line2,char2) =
+  if line1 < line2 then
+    (line2,char2)
+  else if line1 = line2 then
+    if char1 < char2 then
+      (line2,char2)
+    else
+      (line1,char1)
+  else
+    (line1,char1)
+  
+let max_opt_pos pos1 pos2 =
+  match pos1 with
+  | None -> pos2
+  | Some(line1,char1) ->
+     match pos2 with
+     | None -> pos1
+     | Some(line2,char2) ->
+        Some(max_pos (line1,char1) (line2,char2))
+
+let rec max_opt_pos_l posl =
+  match posl with
+  | [] -> None
+  | pos::posr -> max_opt_pos pos (max_opt_pos_l posr)
+
+let pos_fst_pfst pfst =
+  match pfst with
+  | PfStateGoal(_,claimtm,cxtm,cxpf)::pfstr ->
+     PfStateGoal(Some(!lineno,!charno),claimtm,cxtm,cxpf)::pfstr
+  | _ -> pfst
+
 let rec structure_pfstate i goal1 pfstl =
   match pfstl with
-  | (PfStateGoal(claim2,cxtm2,cxpf2)::pfstr) ->
-      (PfStateSep(i,true)::goal1::structure_pfstate i (PfStateGoal(claim2,cxtm2,cxpf2)) pfstr)
+  | (PfStateGoal(startpos,claim2,cxtm2,cxpf2)::pfstr) ->
+      (PfStateSep(i,true)::goal1::structure_pfstate i (PfStateGoal(startpos,claim2,cxtm2,cxpf2)) pfstr)
   | pfstr ->
       (PfStateSep(i,true)::goal1::PfStateSep(i,false)::pfstr)
 
@@ -1621,15 +1844,165 @@ let print_pfstate () =
       match p with
       | PfStateSep(j,true) -> Printf.printf "PfStateSep(%d,true)\n" j
       | PfStateSep(j,false) -> Printf.printf "PfStateSep(%d,false)\n" j
-      | PfStateGoal(claim1,_,_) -> Printf.printf "PfStateGoal(%s,_,_)\n" (tm_to_str claim1)
+      | PfStateGoal(startpos,claim1,_,_) -> Printf.printf "PfStateGoal(startpos,%s,_,_)\n" (tm_to_str claim1)
       )
     !pfstate
 
+let postprobs cls startpos endpos claimtm cxtm cxpf d =
+  if !fofpostsubgoals then
+    begin
+      match !fof with
+      | None -> ()
+      | Some(c) ->
+         match endpos with
+         | None ->
+            begin
+              match startpos with
+              | None -> Printf.printf "do not know start pos and end pos of %s (%d %d)\n" cls !lineno !charno
+              | Some(startlineno,startcharno) -> Printf.printf "do not know end pos of %s starting at %d %d (%d %d)\n" cls startlineno startcharno !lineno !charno
+            end
+         | Some(endlineno,endcharno) ->
+            match startpos with
+            | None -> Printf.printf "do not know start pos of %s ending at %d %d (%d %d)\n" cls endlineno endcharno !lineno !charno
+            | Some(startlineno,startcharno) ->
+               try
+                 Hashtbl.clear usedknowns;
+                 Hashtbl.clear usedhyps;
+                 pf_used d 0 usedknowns usedhyps;
+                 let z = fof_prop_str claimtm (tptpizecxtm cxtm) 0 in (** only if the conclusion is FO **)
+                 let fn =
+                   Printf.sprintf "%s.sl%d.sc%d.el%d.ec%d.%s.fof.p" c startlineno startcharno endlineno endcharno cls
+                 in
+                 let conjn =
+                   Printf.sprintf "%s_%d_%d_%d_%d" c startlineno startcharno endlineno endcharno
+                 in
+                 let ch = open_out fn in
+                 List.iter
+                   (fun (cl,h,_,a) ->
+                     if cl = "type" || cl = "def" && not (Hashtbl.mem sigdelta_opaque h) || cl = "known" && Hashtbl.mem usedknowns h then
+                       Printf.fprintf ch "%s\n" a)
+                   (List.rev !fofsg);
+                 let hypcnt = ref (-1) in
+                 List.iter
+                   (fun (x,p) ->
+                     try
+                       incr hypcnt;
+                       if Hashtbl.mem usedhyps !hypcnt then
+                         let a = fof_prop_str p (tptpizecxtm cxtm) 0 in
+                         Printf.fprintf ch "fof(%s,axiom,%s).\n" (tptpize_name x) a
+                     with NotFO -> ())
+                   cxpf;
+                 Printf.fprintf ch "fof(conj_%s,conjecture,%s).\n" conjn z;
+                 close_out ch
+               with NotFO -> ()
+    end;
+  if !th0postsubgoals then
+    begin
+      match !th0 with
+      | None -> ()
+      | Some(c) ->
+         match endpos with
+         | None ->
+            begin
+              match startpos with
+              | None -> Printf.printf "do not know start pos and end pos of %s (%d %d)\n" cls !lineno !charno
+              | Some(startlineno,startcharno) -> Printf.printf "do not know end pos of %s starting at %d %d (%d %d)\n" cls startlineno startcharno !lineno !charno
+            end
+         | Some(endlineno,endcharno) ->
+            match startpos with
+            | None -> Printf.printf "do not know start pos of %s ending at %d %d (%d %d)\n" cls endlineno endcharno !lineno !charno
+            | Some(startlineno,startcharno) ->
+               Hashtbl.clear usedknowns;
+               Hashtbl.clear usedhyps;
+               pf_used d 0 usedknowns usedhyps;
+               let fn =
+                 Printf.sprintf "%s.sl%d.sc%d.el%d.ec%d.%s.th0.p" c startlineno startcharno endlineno endcharno cls
+               in
+               let conjn =
+                 Printf.sprintf "%s_%d_%d_%d_%d" c startlineno startcharno endlineno endcharno
+               in
+               let ch = open_out fn in
+               List.iter
+                 (fun (cl,h,_,a) ->
+                   if cl = "type" || cl = "def" && not (Hashtbl.mem sigdelta_opaque h) || cl = "known" && Hashtbl.mem usedknowns h then
+                     Printf.fprintf ch "%s\n" a)
+                 (List.rev !th0sg);
+               let rec th0_cx cxtm =
+                 match cxtm with
+                 | [] -> ()
+                 | (x,(a,d))::cxtmr ->
+                    th0_cx cxtmr;
+                    Printf.fprintf ch "thf(%s_tp,type,(%s : %s)).\n" (tptpize_name x) (tptpize_name x) (th0_stp_str a);
+                    match d with
+                    | Some(d) ->
+                       Printf.fprintf ch "thf(%s_def,definition,(%s = %s)).\n" (tptpize_name x) (tptpize_name x) (th0_str d (tptpizecxtm cxtmr))
+                    | None -> ()
+               in
+               th0_cx cxtm;
+               let hypcnt = ref (-1) in
+               List.iter
+                 (fun (x,p) ->
+                   incr hypcnt;
+                   if Hashtbl.mem usedhyps !hypcnt then
+                     let a = th0_str p (tptpizecxtm cxtm) in
+                     Printf.fprintf ch "thf(%s,axiom,%s).\n" (tptpize_name x) a)
+                 cxpf;
+               Printf.fprintf ch "thf(conj_%s,conjecture,%s).\n" conjn (th0_str claimtm (tptpizecxtm cxtm));
+               close_out ch
+    end
+
 let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
+  begin
+    match !th0,!th0singlesubgoal with
+    | Some(c),Some(ln,cn) ->
+       begin
+         if !lineno = ln && !charno >= cn then
+           begin
+             match !pfstate with
+             | PfStateGoal(startpos,atm,cxtm,cxpf)::_ ->
+                begin
+                  let fn =
+                    Printf.sprintf "%s.th0.p" c
+                  in
+                  let ch = open_out fn in
+                  List.iter
+                    (fun (_,_,_,a) -> Printf.fprintf ch "%s\n" a)
+                    (List.rev !th0sg);
+                  let rec th0_cx cxtm =
+                    match cxtm with
+                    | [] -> ()
+                    | (x,(a,d))::cxtmr ->
+                       th0_cx cxtmr;
+                       Printf.fprintf ch "thf(%s_tp,type,(%s : %s)).\n" (tptpize_name x) (tptpize_name x) (th0_stp_str a);
+                       match d with
+                       | Some(d) ->
+                          Printf.fprintf ch "thf(%s_def,definition,(%s = %s)).\n" (tptpize_name x) (tptpize_name x) (th0_str d (tptpizecxtm cxtmr))
+                       | None -> ()
+                  in
+                  th0_cx cxtm;
+                  let cnt = ref 0 in
+                  List.iter
+                    (fun (x,p) ->
+                      incr cnt;
+                      if not !bushy || Hashtbl.mem bushyhdeps !cnt then
+                        let a = th0_str p (tptpizecxtm cxtm) in
+                        Printf.fprintf ch "thf(%s,axiom,%s).\n" (tptpize_name x) a)
+                    (List.rev cxpf);
+                  Printf.fprintf ch "thf(conj_%s,conjecture,%s).\n" c (th0_str atm (tptpizecxtm cxtm));
+                  close_out ch;
+                  exit 0
+                end
+             | _ ->
+                Printf.printf "No claim at line %d and char %d\n" ln cn;
+                exit 1
+           end
+       end
+    | _ -> ()
+  end;
   if !th0allsubgoals && th0p() then
     begin
       match !pfstate with
-      | PfStateGoal(atm,cxtm,cxpf)::_ ->
+      | PfStateGoal(startpos,atm,cxtm,cxpf)::_ ->
          begin
            match !th0 with
            | Some(c) ->
@@ -1637,14 +2010,14 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
                 let n = !th0subgoalcnt in
                 incr th0subgoalcnt;
                 let fn =
-                  Printf.sprintf "%s.sg%d.th0.p" c n
+                  Printf.sprintf "%s.sg%d.line%d.%d.th0.p" c n !lineno !charno
                 in
                 let conjn =
                   Printf.sprintf "%s_sg%d" c n
                 in
                 let ch = open_out fn in
                 List.iter
-                  (fun a -> Printf.fprintf ch "%s\n" a)
+                  (fun (_,_,_,a) -> Printf.fprintf ch "%s\n" a)
                   (List.rev !th0sg);
                 let rec th0_cx cxtm =
                   match cxtm with
@@ -1673,6 +2046,43 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
          end
       | _ -> ()
     end;
+  if !fofallsubgoals && fofp() then
+    begin
+      match !pfstate with
+      | PfStateGoal(startpos,atm,cxtm,cxpf)::_ ->
+         begin
+           match !fof with
+           | Some(c) ->
+              begin
+                try
+                  let z = fof_prop_str atm (tptpizecxtm cxtm) 0 in (** only if the conclusion is FO **)
+                  let n = !fofsubgoalcnt in
+                  incr fofsubgoalcnt;
+                  let fn =
+                    Printf.sprintf "%s.sg%d.line%d.%dfof.p" c n !lineno !charno
+                  in
+                  let conjn =
+                    Printf.sprintf "%s_sg%d" c n
+                  in
+                  let ch = open_out fn in
+                  List.iter
+                    (fun (_,_,_,a) -> Printf.fprintf ch "%s\n" a)
+                    (List.rev !fofsg);
+                  List.iter
+                    (fun (x,p) ->
+                      try
+                        let a = fof_prop_str p (tptpizecxtm cxtm) 0 in
+                        Printf.fprintf ch "fof(%s,axiom,%s).\n" (tptpize_name x) a
+                      with NotFO -> ())
+                    (List.rev cxpf);
+                  Printf.fprintf ch "fof(conj_%s,conjecture,%s).\n" conjn z;
+                  close_out ch
+                with NotFO -> ()
+              end
+           | None -> ()
+         end
+      | _ -> ()
+    end;
   match pitem with
   | PfStruct i when i < 4 ->
       if !verbosity > 19 then (Printf.printf "pfstruct %d\nLength of pfstate stack: %d\n" i (List.length !pfstate); print_pfstate (); flush stdout);
@@ -1682,7 +2092,7 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
 	    if i = j then
 	      begin
 		laststructaction := 2;
-		pfstate := pfstr;
+		pfstate := pos_fst_pfst pfstr;
 		if !verbosity > 19 then (Printf.printf "pfstruct %d pop\nLength of pfstate stack: %d\n" i (List.length !pfstate); flush stdout);
 	      end
 	    else
@@ -1691,11 +2101,11 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
 	    raise (Failure("Proof structuring bug"))
 	| [] ->
 	    raise (Failure("No claim to prove here"))
-	| PfStateGoal(claim1,cxtm1,cxpf1)::PfStateGoal(claim2,cxtm2,cxpf2)::pfstr ->
+	| PfStateGoal(_,claim1,cxtm1,cxpf1)::PfStateGoal(startpos2,claim2,cxtm2,cxpf2)::pfstr ->
 	    laststructaction := 1;
-	    pfstate := PfStateGoal(claim1,cxtm1,cxpf1)::structure_pfstate i (PfStateGoal(claim2,cxtm2,cxpf2)) pfstr;
+	    pfstate := PfStateGoal(Some(!lineno,!charno),claim1,cxtm1,cxpf1)::structure_pfstate i (PfStateGoal(startpos2,claim2,cxtm2,cxpf2)) pfstr;
 	    if !verbosity > 19 then (Printf.printf "pfstruct %d push\nLength of pfstate stack: %d\n" i (List.length !pfstate); flush stdout);
-	| PfStateGoal(claim1,cxtm1,cxpf1)::pfstr ->
+	| PfStateGoal(startpos,claim1,cxtm1,cxpf1)::pfstr ->
 	    raise (Failure("Inappropriate place for this proof structuring symbol since there is only one goal"))
       end
   | PfStruct 4 ->
@@ -1705,15 +2115,16 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
 	    raise (Failure("A subproof cannot be started here"))
 	| [] ->
 	    raise (Failure("No claim to prove here"))
-	| PfStateGoal(claim1,cxtm1,cxpf1)::pfstr ->
-	    pfstate := PfStateGoal(claim1,cxtm1,cxpf1)::PfStateSep(5,true)::pfstr
+	| PfStateGoal(_,claim1,cxtm1,cxpf1)::pfstr ->
+           
+	   pfstate := PfStateGoal(Some(!lineno,!charno),claim1,cxtm1,cxpf1)::PfStateSep(5,true)::pfstr
       end
   | PfStruct 5 ->
       begin
 	match !pfstate with
 	| PfStateSep(j,_)::pfstr ->
 	    if j = 5 then
-	      pfstate := pfstr
+	      pfstate := pos_fst_pfst pfstr
 	    else
 	      raise (Failure("Previous subproof not completed"))
 	| [] ->
@@ -1725,13 +2136,102 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
       let d = ltree_to_atree d in
       begin
 	match !pfstate with
-	| (PfStateGoal(claimtm,cxtm,cxpf) as pfst)::pfstr ->
+	| (PfStateGoal(startpos,claimtm,cxtm,cxpf) as pfst)::pfstr ->
            begin
              try
 	       let dpf = check_pf d claimtm !polytm !polypf sigtmof sigdelta !sigtm !sigpf !ctxtp cxtm cxpf in
 	       let currprooffun = !prooffun in
-	       prooffun := (fun dl -> currprooffun (dpf::dl));
-	       pfstate := pfstr
+               let endpos = Some(!lineno,!charno) in
+	       prooffun := (fun dl -> currprooffun ((endpos,dpf)::dl));
+	       pfstate := pfstr;
+               begin
+                 if !fofpostsubgoals && fofp() then
+                   begin
+                     match !fof with
+                     | None -> ()
+                     | Some(c) ->
+                        match startpos with
+                        | None -> ()
+                        | Some(startlineno,startcharno) ->
+                           try
+                             Hashtbl.clear usedknowns;
+                             Hashtbl.clear usedhyps;
+                             pf_used dpf 0 usedknowns usedhyps;
+                             let z = fof_prop_str claimtm (tptpizecxtm cxtm) 0 in (** only if the conclusion is FO **)
+                             let fn =
+                               Printf.sprintf "%s.sl%d.sc%d.el%d.ec%d.exact.fof.p" c startlineno startcharno !lineno !charno
+                             in
+                             let conjn =
+                               Printf.sprintf "%s_%d_%d_%d_%d" c startlineno startcharno !lineno !charno
+                             in
+                             let ch = open_out fn in
+                             List.iter
+                               (fun (cl,h,_,a) ->
+                                 if cl = "type" || cl = "def" && not (Hashtbl.mem sigdelta_opaque h) || cl = "known" && Hashtbl.mem usedknowns h then
+                                   Printf.fprintf ch "%s\n" a)
+                               (List.rev !fofsg);
+                             let hypcnt = ref (-1) in
+                             List.iter
+                               (fun (x,p) ->
+                                 try
+                                   incr hypcnt;
+                                   if Hashtbl.mem usedhyps !hypcnt then
+                                     let a = fof_prop_str p (tptpizecxtm cxtm) 0 in
+                                     Printf.fprintf ch "fof(%s,axiom,%s).\n" (tptpize_name x) a
+                                 with NotFO -> ())
+                               cxpf;
+                             Printf.fprintf ch "fof(conj_%s,conjecture,%s).\n" conjn z;
+                             close_out ch
+                           with NotFO -> ()
+                   end
+               end;
+               if !th0postsubgoals && th0p () then
+                 begin
+                   match !th0 with
+                   | None -> ()
+                   | Some(c) ->
+                      match startpos with
+                      | None ->
+                         Printf.printf "do not know start position of exact ending at %d %d\n" !lineno !charno
+                      | Some(startlineno,startcharno) ->
+                         Hashtbl.clear usedknowns;
+                         Hashtbl.clear usedhyps;
+                         pf_used dpf 0 usedknowns usedhyps;
+                         let fn =
+                           Printf.sprintf "%s.sl%d.sc%d.el%d.ec%d.exact.th0.p" c startlineno startcharno !lineno !charno
+                         in
+                         let conjn =
+                           Printf.sprintf "%s_%d_%d_%d_%d" c startlineno startcharno !lineno !charno
+                         in
+                         let ch = open_out fn in
+                         List.iter
+                           (fun (cl,h,_,a) ->
+                             if cl = "type" || cl = "def" && not (Hashtbl.mem sigdelta_opaque h) || cl = "known" && Hashtbl.mem usedknowns h then
+                               Printf.fprintf ch "%s\n" a)
+                           (List.rev !th0sg);
+                         let rec th0_cx cxtm =
+                           match cxtm with
+                           | [] -> ()
+                           | (x,(a,d))::cxtmr ->
+                              th0_cx cxtmr;
+                              Printf.fprintf ch "thf(%s_tp,type,(%s : %s)).\n" (tptpize_name x) (tptpize_name x) (th0_stp_str a);
+                              match d with
+                              | Some(d) ->
+                                 Printf.fprintf ch "thf(%s_def,definition,(%s = %s)).\n" (tptpize_name x) (tptpize_name x) (th0_str d (tptpizecxtm cxtmr))
+                              | None -> ()
+                         in
+                         th0_cx cxtm;
+                         let cnt = ref 0 in
+                         List.iter
+                           (fun (x,p) ->
+                             incr cnt;
+                             if not !bushy || Hashtbl.mem bushyhdeps !cnt then
+                               let a = th0_str p (tptpizecxtm cxtm) in
+                               Printf.fprintf ch "thf(%s,axiom,%s).\n" (tptpize_name x) a)
+                           (List.rev cxpf);
+                         Printf.fprintf ch "thf(conj_%s,conjecture,%s).\n" conjn (th0_str claimtm (tptpizecxtm cxtm));
+                         close_out ch
+                 end;
              with SearchLimit ->
                admitpfstateatp pfst;
 	       pfstate := pfstr;
@@ -1745,23 +2245,36 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
       laststructaction := 0;
       begin
 	match !pfstate with
-	| PfStateGoal(claimtm,cxtm,cxpf)::pfstr ->
+	| PfStateGoal(startpos,claimtm,cxtm,cxpf)::pfstr ->
 	    let rec let_tac_None_r xs claimtm cxtm cxpf =
 	      match xs with
 	      | [] ->
-		  pfstate := PfStateGoal(claimtm,cxtm,cxpf)::pfstr
+		  pfstate := PfStateGoal(Some(!lineno,!charno),claimtm,cxtm,cxpf)::pfstr
 	      | (x::xr) ->
 		  match claimtm with
 		  | All(a,body) -> (*** If it's already an All, then don't call headnorm since headnorm will at least beta eta normalize and change the structure. ***)
 		      let currprooffun = !prooffun in
-		      prooffun := (fun dl -> match dl with d::dr -> currprooffun (TLam(a,d)::dr) | _ -> raise (Failure("proof reconstruction problem")));
+		      prooffun := (fun dl ->
+                        match dl with
+                          (endpos,d1)::dr ->
+                           let d = TLam(a,d1) in
+                           postprobs "let" startpos endpos claimtm cxtm cxpf d;
+                           currprooffun ((endpos,d)::dr)
+                        | _ -> raise (Failure("proof reconstruction problem")));
 		      let_tac_None_r xr body ((x,(a,None))::cxtm) (List.map (fun (y,q) -> (y,tmshift 0 1 q)) cxpf)
 		  | _ -> (*** If it's not an All, then call headnorm and try to expose an All. ***)
 		      let (p,dl) = headnorm claimtm sigdelta !deltaset in
 		      match p with
 		      | All(a,body) ->
 			  let currprooffun = !prooffun in
-			  prooffun := (fun dl -> match dl with d::dr -> currprooffun (TLam(a,d)::dr) | _ -> raise (Failure("proof reconstruction problem")));
+			  prooffun :=
+                            (fun dl ->
+                              match dl with
+                                (endpos,d1)::dr ->
+                                 let d = TLam(a,d1) in
+                                 postprobs "let" startpos endpos claimtm cxtm cxpf d;
+                                 currprooffun ((endpos,d)::dr)
+                              | _ -> raise (Failure("proof reconstruction problem")));
 			  let_tac_None_r xr body ((x,(a,None))::cxtm) (List.map (fun (y,q) -> (y,tmshift 0 1 q)) cxpf)
 		      | _ ->
 			  raise (Failure("let tactic used with " ^ x ^ " when claim is not a universal quantifier"))
@@ -1776,17 +2289,17 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
       let btp = extract_tp b !ctxtp in
       begin
 	match !pfstate with
-	| PfStateGoal(claimtm,cxtm,cxpf)::pfstr ->
+	| PfStateGoal(startpos,claimtm,cxtm,cxpf)::pfstr ->
 	    let rec let_tac_Some_r xs claimtm cxtm cxpf =
 	      match xs with
 	      | [] ->
-		  pfstate := PfStateGoal(claimtm,cxtm,cxpf)::pfstr
+		  pfstate := PfStateGoal(Some(!lineno,!charno),claimtm,cxtm,cxpf)::pfstr
 	      | (x::xr) ->
 		  match claimtm with
 		  | All(a,body) -> (*** If it's already an All, then don't call headnorm since headnorm will at least beta eta normalize and change the structure. ***)
 		      if a = btp then
 			let currprooffun = !prooffun in
-			prooffun := (fun dl -> match dl with d::dr -> currprooffun (TLam(a,d)::dr) | _ -> raise (Failure("proof reconstruction problem")));
+			prooffun := (fun dl -> match dl with (endpos,d)::dr -> currprooffun ((endpos,TLam(a,d))::dr) | _ -> raise (Failure("proof reconstruction problem")));
 			let_tac_Some_r xr body ((x,(a,None))::cxtm) (List.map (fun (y,q) -> (y,tmshift 0 1 q)) cxpf)
 		      else
 			raise (Failure(x ^ " ascribe type " ^ (tp_to_str btp) ^ " but the claim is universally quantified over type " ^ (tp_to_str a)))
@@ -1796,7 +2309,7 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
 		      | All(a,body) ->
 			  if a = btp then
 			    let currprooffun = !prooffun in
-			    prooffun := (fun dl -> match dl with d::dr -> currprooffun (TLam(a,d)::dr) | _ -> raise (Failure("proof reconstruction problem")));
+			    prooffun := (fun dl -> match dl with (endpos,d)::dr -> currprooffun ((endpos,TLam(a,d))::dr) | _ -> raise (Failure("proof reconstruction problem")));
 			    let_tac_Some_r xr body ((x,(a,None))::cxtm) (List.map (fun (y,q) -> (y,tmshift 0 1 q)) cxpf)
 			  else
 			    raise (Failure(x ^ " ascribe type " ^ (tp_to_str btp) ^ " but the claim is universally quantified over type " ^ (tp_to_str a)))
@@ -1811,23 +2324,23 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
       laststructaction := 0;
       begin
 	match !pfstate with
-	| PfStateGoal(claimtm,cxtm,cxpf)::pfstr ->
+	| PfStateGoal(startpos,claimtm,cxtm,cxpf)::pfstr ->
 	    let rec assume_tac_None_r xs claimtm cxtm cxpf =
 	      match xs with
 	      | [] ->
-		  pfstate := PfStateGoal(claimtm,cxtm,cxpf)::pfstr
+		  pfstate := PfStateGoal(Some(!lineno,!charno),claimtm,cxtm,cxpf)::pfstr
 	      | (x::xr) ->
 		  match claimtm with
 		  | Imp(p1,p2) -> (*** If it's already an Imp, then don't call headnorm since headnorm will at least beta eta normalize and change the structure. ***)
 		      let currprooffun = !prooffun in
-		      prooffun := (fun dl -> match dl with d::dr -> currprooffun (PLam(p1,d)::dr) | _ -> raise (Failure("proof reconstruction problem")));
+		      prooffun := (fun dl -> match dl with (endpos,d)::dr -> currprooffun ((endpos,PLam(p1,d))::dr) | _ -> raise (Failure("proof reconstruction problem")));
 		      assume_tac_None_r xr p2 cxtm ((x,p1)::cxpf)
 		  | _ -> (*** If it's not an All, then call headnorm and try to expose an All. ***)
 		      let (p,dl) = headnorm claimtm sigdelta !deltaset in
 		      match p with
 		      | Imp(p1,p2) ->
 			  let currprooffun = !prooffun in
-			  prooffun := (fun dl -> match dl with d::dr -> currprooffun (PLam(p1,d)::dr) | _ -> raise (Failure("proof reconstruction problem")));
+			  prooffun := (fun dl -> match dl with (endpos,d)::dr -> currprooffun ((endpos,PLam(p1,d))::dr) | _ -> raise (Failure("proof reconstruction problem")));
 			  assume_tac_None_r xr p2 cxtm ((x,p1)::cxpf)
 		      | _ ->
 			  raise (Failure("assume tactic used with " ^ x ^ " when claim is not an implication"))
@@ -1841,12 +2354,12 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
       let b = ltree_to_atree b in
       begin
 	match !pfstate with
-	| PfStateGoal(claimtm,cxtm,cxpf)::pfstr ->
+	| PfStateGoal(startpos,claimtm,cxtm,cxpf)::pfstr ->
 	    let btm = check_tm b Prop !polytm sigtmof !sigtm !ctxtp cxtm in
 	    let rec assume_tac_Some_r xs claimtm cxtm cxpf =
 	      match xs with
 	      | [] ->
-		  pfstate := PfStateGoal(claimtm,cxtm,cxpf)::pfstr
+		  pfstate := PfStateGoal(Some(!lineno,!charno),claimtm,cxtm,cxpf)::pfstr
 	      | (x::xr) ->
 		  match claimtm with
 		  | Imp(p1,p2) -> (*** If it's already an Imp, then don't call headnorm since headnorm will at least beta eta normalize and change the structure. ***)
@@ -1855,7 +2368,14 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
 			| Some(dl) ->
 			    deltaset := dl;
 			    let currprooffun = !prooffun in
-			    prooffun := (fun dl -> match dl with d::dr -> currprooffun (PLam(btm,d)::dr) | _ -> raise (Failure("proof reconstruction problem")));
+			    prooffun :=
+                              (fun dl ->
+                                match dl with
+                                  (endpos,d1)::dr ->
+                                   let d = PLam(btm,d1) in
+                                   postprobs "assume" startpos endpos claimtm cxtm cxpf d;
+                                   currprooffun ((endpos,d)::dr)
+                                | _ -> raise (Failure("proof reconstruction problem")));
 			    assume_tac_Some_r xr p2 cxtm ((x,btm)::cxpf)
 			| None ->
 			    raise (Failure(x ^ " ascribed prop " ^ (tm_to_str btm) ^ " but the antecendent of the claim is " ^ (tm_to_str p1)))
@@ -1869,7 +2389,7 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
 			    | Some(dl) ->
 				deltaset := dl;
 				let currprooffun = !prooffun in
-				prooffun := (fun dl -> match dl with d::dr -> currprooffun (PLam(btm,d)::dr) | _ -> raise (Failure("proof reconstruction problem")));
+				prooffun := (fun dl -> match dl with (endpos,d)::dr -> currprooffun ((endpos,PLam(btm,d))::dr) | _ -> raise (Failure("proof reconstruction problem")));
 				assume_tac_Some_r xr p2 cxtm ((x,btm)::cxpf)
 			    | None ->
 				raise (Failure(x ^ " ascribed prop " ^ (tm_to_str btm) ^ " but the antecendent of the claim is " ^ (tm_to_str p1)))
@@ -1886,9 +2406,9 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
       let b = ltree_to_atree b in
       begin
 	match !pfstate with
-	| PfStateGoal(claimtm,cxtm,cxpf)::pfstr ->
+	| PfStateGoal(startpos,claimtm,cxtm,cxpf)::pfstr ->
 	    let (btm,btp) = extract_tm b !polytm sigtmof !sigtm !ctxtp cxtm in
-	    pfstate := (PfStateGoal(claimtm,(x,(btp,Some(btm)))::cxtm,cxpf))::pfstr
+	    pfstate := (PfStateGoal(Some(!lineno,!charno),claimtm,(x,(btp,Some(btm)))::cxtm,cxpf))::pfstr
 	| _ ->
 	    raise (Failure("set tactic cannot be used when there is no claim"))
       end
@@ -1897,10 +2417,10 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
       let b = ltree_to_atree b in
       begin
 	match !pfstate with
-	| PfStateGoal(claimtm,cxtm,cxpf)::pfstr ->
+	| PfStateGoal(startpos,claimtm,cxtm,cxpf)::pfstr ->
 	    let atp = extract_tp a !ctxtp in
 	    let btm = check_tm b atp !polytm sigtmof !sigtm !ctxtp cxtm in
-	    pfstate := (PfStateGoal(claimtm,(x,(atp,Some(btm)))::cxtm,cxpf))::pfstr
+	    pfstate := (PfStateGoal(Some(!lineno,!charno),claimtm,(x,(atp,Some(btm)))::cxtm,cxpf))::pfstr
 	| _ ->
 	    raise (Failure("set tactic cannot be used when there is no claim"))
       end
@@ -1910,7 +2430,7 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
       if !verbosity > 19 then (Printf.printf "apply tactic begin\nLength of pfstate stack: %d\n" (List.length !pfstate); flush stdout);
       begin
 	match !pfstate with
-	| PfStateGoal(claimtm,cxtm,cxpf)::pfstr ->
+	| PfStateGoal(startpos,claimtm,cxtm,cxpf)::pfstr ->
 	    let (apf,atm) = extract_pf a !polytm !polypf sigtmof sigdelta !sigtm !sigpf !ctxtp cxtm cxpf in
 	    let sigma =
 	      begin
@@ -1937,13 +2457,13 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
 	      with MatchFail ->
 		match p with
 		| MImp(p1,p2) ->
-		    foapplyf p2 n margs (p1::subclaims) (fun ml dl -> match dl with d::dr -> PPfAp(apff ml dr,d) | _ -> raise (Failure("proof reconstruction problem")))
+		   foapplyf p2 n margs (p1::subclaims) (fun ml dl -> match dl with (endpos,d)::dr -> PPfAp(apff ml dr,d) | _ -> raise (Failure("proof reconstruction problem")))
 		| MAll(a1,p2) ->
 		    begin
 		      match mtm_minap_db p2 0 with
 		      | None -> (*** special case: no occurrence, use Eps _:a1, False ***)
 			  let defelt = Ap(TpAp(Prim(0),a1),Lam(a1,All(Prop,DB(0)))) in
-			  foapplyf p2 n margs subclaims (fun ml dl -> match dl with d::dr -> PTmAp(apff ml dr,defelt) | _ -> raise (Failure("proof reconstruction problem")))
+			  foapplyf p2 n margs subclaims (fun ml dl -> match dl with (endpos,d)::dr -> PTmAp(apff ml dr,defelt) | _ -> raise (Failure("proof reconstruction problem")))
 		      | Some(l) when l = 0 -> (*** simple case, like a FO var ***)
 			  foapplyf (mtm_ssub (MVar(n,sigma)::sigma) p2) (n+1) (MVar(n,sigma)::margs) subclaims (fun ml dl -> match ml with m::mr -> PTmAp(apff mr dl,m) | _ -> raise (Failure("proof reconstruction problem")))
 		      | Some(l) -> (*** otherwise, move l arguments into the context of the metavar so that the higher-order pattern case is handled ***)
@@ -1985,8 +2505,21 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
 		let (subclaims,apff) = foapplyf (tm_to_mtm atm) 0 [] [] (fun ml dl -> apf) in
 		let nsubs = List.length subclaims in
 		let currprooffun = !prooffun in
-		prooffun := (fun dl -> let (dl1,dl2) = split_list nsubs dl in currprooffun (apff (List.rev dl1)::dl2));
-		pfstate := (List.map (fun c -> PfStateGoal(c,cxtm,cxpf)) subclaims) @ pfstr;
+                let currpos = Some(!lineno,!charno) in
+		prooffun :=
+                  (fun dl ->
+                    let (dl1,dl2) = split_list nsubs dl in
+                    let endpos = max_opt_pos currpos (max_opt_pos_l (List.map (fun (ep,_) -> ep) dl1)) in
+                    let d = apff (List.rev dl1) in
+                    postprobs "apply" startpos endpos claimtm cxtm cxpf d;
+                    currprooffun ((endpos,d)::dl2));
+                begin
+                  match subclaims with
+                  | [] -> pfstate := pfstr
+                  | [subclaim1] -> pfstate := PfStateGoal(Some(!lineno,!charno),subclaim1,cxtm,cxpf)::pfstr
+                  | subclaim1::subclaimsr ->
+		     pfstate := PfStateGoal(Some(!lineno,!charno),subclaim1,cxtm,cxpf)::(List.map (fun c -> PfStateGoal(None,c,cxtm,cxpf)) subclaimsr) @ pfstr;
+                end;
 		if !verbosity > 19 then (Printf.printf "here nach apply\nLength of pfstate stack: %d\n" (List.length !pfstate); flush stdout);
 	      with Not_found ->
 		raise (Failure("apply does not match the current claim"))
@@ -1999,40 +2532,73 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
       let a = ltree_to_atree a in
       begin
 	match !pfstate with
-	| PfStateGoal(claimtm,cxtm,cxpf)::pfstr ->
-	    let atm = check_tm a Prop !polytm sigtmof !sigtm !ctxtp cxtm in
-	    pfstate := (PfStateGoal(atm,cxtm,cxpf))::(PfStateGoal(claimtm,cxtm,(x,atm)::cxpf))::pfstr;
-	    let currprooffun = !prooffun in
-	    prooffun := (fun dl -> match dl with d1::d2::dr -> currprooffun (PPfAp(PLam(atm,d2),d1)::dr) | _ -> raise (Failure("proof reconstruction problem")))
+	| PfStateGoal(startpos,claimtm,cxtm,cxpf)::pfstr ->
+	   let atm = check_tm a Prop !polytm sigtmof !sigtm !ctxtp cxtm in
+           let currpos = Some(!lineno,!charno) in
+	   pfstate := (PfStateGoal(currpos,atm,cxtm,cxpf))::(PfStateGoal(None,claimtm,cxtm,(x,atm)::cxpf))::pfstr;
+	   let currprooffun = !prooffun in
+	   prooffun :=
+             (fun dl ->
+               match dl with
+                 (endpos1,d1)::(endpos2,d2)::dr ->
+                  let d = PPfAp(PLam(atm,d2),d1) in
+                  postprobs "claim" startpos endpos2 claimtm cxtm cxpf d;
+                  currprooffun ((endpos2,d)::dr)
+               | _ -> raise (Failure("proof reconstruction problem")))
 	| _ ->
-	    raise (Failure("claim tactic cannot be used when there is no claim"))
+	   raise (Failure("claim tactic cannot be used when there is no claim"))
       end
   | ProveTac(a,[]) ->
       laststructaction := 0;
       let a = ltree_to_atree a in
       begin
 	match !pfstate with
-	| PfStateGoal(claimtm,cxtm,cxpf)::pfstr ->
+	| PfStateGoal(startpos,claimtm,cxtm,cxpf)::pfstr ->
 	    let atm = check_tm a Prop !polytm sigtmof !sigtm !ctxtp cxtm in
 	    begin
 	      match conv claimtm atm sigdelta !deltaset with
 	      | Some(dl) ->
-		  deltaset := dl;
-		  pfstate := (PfStateGoal(atm,cxtm,cxpf))::pfstr
+		 deltaset := dl;
+                 begin
+                   if !fofpostsubgoals || !th0postsubgoals then
+                     let currprooffun = !prooffun in
+                     prooffun :=
+                       (fun dl ->
+                         match dl with
+                         | (endpos1,d1)::dr ->
+                            postprobs "prove" startpos endpos1 claimtm cxtm cxpf d1;
+                            currprooffun ((endpos1,d1)::dr)
+                         | _ -> raise (Failure("proof reconstruction problem")))
+                 end;
+		 pfstate := (PfStateGoal(Some(!lineno,!charno),atm,cxtm,cxpf))::pfstr
 	      | None ->
 		  match conv (TmH(!fal)) atm sigdelta !deltaset with (*** or if prove False, then use FalseE ***)
                   | Some(del) ->
 		     deltaset := del;
 		     let currprooffun = !prooffun in
-		     prooffun := (fun dl -> match dl with d1::dr -> currprooffun (PTmAp(PPfAp(Known(!fale),d1),claimtm)::dr) | _ -> raise (Failure("proof reconstruction problem")));
-		     pfstate := (PfStateGoal(atm,cxtm,cxpf))::pfstr
+		     prooffun :=
+                       (fun dl ->
+                         match dl with
+                           (endpos1,d1)::dr ->
+                            let d = PTmAp(PPfAp(Known(!fale),d1),claimtm) in
+                            postprobs "prove" startpos endpos1 claimtm cxtm cxpf d;
+                            currprooffun ((endpos1,d)::dr)
+                         | _ -> raise (Failure("proof reconstruction problem")));
+		     pfstate := (PfStateGoal(Some(!lineno,!charno),atm,cxtm,cxpf))::pfstr
                   | None ->
 		     match conv (All(Prop,DB(0))) atm sigdelta !deltaset with (*** or if prove False, then use old FalseE ***)
 		     | Some(del) ->
 		        deltaset := del;
 		        let currprooffun = !prooffun in
-		        prooffun := (fun dl -> match dl with d1::dr -> currprooffun (PTmAp(d1,claimtm)::dr) | _ -> raise (Failure("proof reconstruction problem")));
-		        pfstate := (PfStateGoal(atm,cxtm,cxpf))::pfstr
+		        prooffun :=
+                          (fun dl ->
+                            match dl with
+                              (endpos1,d1)::dr ->
+                               let d = PTmAp(d1,claimtm) in
+                               postprobs "prove" startpos endpos1 claimtm cxtm cxpf d;
+                               currprooffun ((endpos1,d)::dr)
+                            | _ -> raise (Failure("proof reconstruction problem")));
+		        pfstate := (PfStateGoal(Some(!lineno,!charno),atm,cxtm,cxpf))::pfstr
 		     | None ->
 		        raise (Failure("Proposition given with prove tactic does not match the current claim.\n" ^ tm_to_str claimtm ^ "\n" ^ tm_to_str atm))
 	    end
@@ -2050,7 +2616,7 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
       let a = ltree_to_atree a in
       begin
 	match !pfstate with
-	| PfStateGoal(claimtm,cxtm,cxpf)::pfstr ->
+	| PfStateGoal(startpos,claimtm,cxtm,cxpf)::pfstr ->
 	   begin
 	     try
 	       let (etp,ep) = extract_exclaim claimtm in
@@ -2063,16 +2629,25 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
 		 end
 	       in
 	       if !verbosity > 50 then (Printf.printf "witness tactic with etp = %s\n and ep = %s\n and atm = %s\n and epatm = %s\n" (tp_to_str etp) (tm_to_str ep) (tm_to_str atm) (tm_to_str epatm); flush stdout);
-	       pfstate := (PfStateGoal(epatm,cxtm,cxpf)::pfstr);
+	       pfstate := (PfStateGoal(startpos,epatm,cxtm,cxpf)::pfstr);
 	       let currprooffun = !prooffun in
                if !expolyIknown then
-	         prooffun := (fun dl -> match dl with d1::dr -> currprooffun (PPfAp(PTmAp(PTmAp(PTpAp(Known(!expolyI),etp),ep),atm),d1)::dr) | _ -> raise (Failure("proof reconstruction problem")))
+	         prooffun :=
+                   (fun dl ->
+                     match dl with
+                       (endpos,d1)::dr ->
+                        let d = PPfAp(PTmAp(PTmAp(PTpAp(Known(!expolyI),etp),ep),atm),d1) in
+                        postprobs "witness" startpos endpos claimtm cxtm cxpf d;
+                        currprooffun ((endpos,d)::dr)
+                     | _ -> raise (Failure("proof reconstruction problem")))
                else
 	         prooffun :=
                    (fun dl ->
                      match dl with
-                       d1::dr ->
-                       currprooffun (TLam(Prop,PLam(All(etp,Imp(gen_lam_body(tmshift 0 1 ep),DB(1))),PPfAp(PTmAp(Hyp(0),tmshift 0 1 atm),pftmshift 0 1 (pfshift 0 1 d1))))::dr)
+                       (endpos,d1)::dr ->
+                        let d = TLam(Prop,PLam(All(etp,Imp(gen_lam_body(tmshift 0 1 ep),DB(1))),PPfAp(PTmAp(Hyp(0),tmshift 0 1 atm),pftmshift 0 1 (pfshift 0 1 d1)))) in
+                        postprobs "witness" startpos endpos claimtm cxtm cxpf d;
+                        currprooffun ((endpos,d)::dr)
                      | _ -> raise (Failure("proof reconstruction problem")))
 	     with Not_found ->
 	       raise (Failure("witness tactic can only be used when claim is existential"))
@@ -2086,7 +2661,7 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
       if !verbosity > 19 then (Printf.printf "rewrite tactic begin\nLength of pfstate stack: %d\n" (List.length !pfstate); flush stdout);
       begin
 	match !pfstate with
-	| PfStateGoal(claimtm,cxtm,cxpf)::pfstr ->
+	| PfStateGoal(startpos,claimtm,cxtm,cxpf)::pfstr ->
 	    let (apf,atm) = extract_pf a !polytm !polypf sigtmof sigdelta !sigtm !sigpf !ctxtp cxtm cxpf in
 	    let sigma =
 	      begin
@@ -2222,14 +2797,14 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
 			if sym then
 			  (fun dl ->
 			    match dl with
-			      d::dr ->
+			      (endpos,d)::dr ->
 				let epf = apff ml dr in
 				PPfAp(PTmAp(epf,Lam(etp,Lam(etp,tmshift 0 1 leibq))),d)
 			    | _ -> raise (Failure("proof reconstruction problem")))
 			else
 			  (fun dl ->
 			    match dl with
-			      d::dr ->
+			      (endpos,d)::dr ->
 				let epf = apff ml dr in
 				PPfAp(PTmAp(epf,Lam(etp,Lam(etp,tmshift 1 1 leibq))),d)
 			    | _ -> raise (Failure("proof reconstruction problem")))
@@ -2241,13 +2816,13 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
 		with Not_found ->
 		  match p with
 		  | MImp(p1,p2) ->
-		      forewritef p2 n margs (p1::subclaims) (fun ml dl -> match dl with d::dr -> PPfAp(apff ml dr,d) | _ -> raise (Failure("proof reconstruction problem")))
+		      forewritef p2 n margs (p1::subclaims) (fun ml dl -> match dl with (endpos,d)::dr -> PPfAp(apff ml dr,d) | _ -> raise (Failure("proof reconstruction problem")))
 		  | MAll(a1,p2) ->
 		      begin
 			match mtm_minap_db p2 0 with
 			| None -> (*** special case: no occurrence, use Eps _:a1, False ***)
 			    let defelt = Ap(TpAp(Prim(0),a1),Lam(a1,All(Prop,DB(0)))) in
-			    forewritef p2 n margs subclaims (fun ml dl -> match dl with d::dr -> PTmAp(apff ml dr,defelt) | _ -> raise (Failure("proof reconstruction problem")))
+			    forewritef p2 n margs subclaims (fun ml dl -> match dl with (endpos,d)::dr -> PTmAp(apff ml dr,defelt) | _ -> raise (Failure("proof reconstruction problem")))
 			| Some(l) when l = 0 -> (*** simple case, like a FO var ***)
 			    forewritef (mtm_ssub (MVar(n,sigma)::sigma) p2) (n+1) (MVar(n,sigma)::margs) subclaims (fun ml dl -> match ml with m::mr -> PTmAp(apff mr dl,m) | _ -> raise (Failure("proof reconstruction problem")))
 			| Some(l) -> (*** otherwise, move l arguments into the context of the metavar so that the higher-order pattern case is handled ***)
@@ -2293,8 +2868,22 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
 		let (subclaims,apff) = forewritef (tm_to_mtm atm) 0 [] [] (fun ml dl -> apf) in
 		let nsubs = List.length subclaims in
 		let currprooffun = !prooffun in
-		prooffun := (fun dl -> match dl with d::dr -> let (dl1,dl2) = split_list (nsubs-1) dr in currprooffun (apff (d::(List.rev dl1))::dl2) | [] -> raise (Failure("proof reconstruction problem")));
-		pfstate := (List.map (fun c -> PfStateGoal(c,cxtm,cxpf)) subclaims) @ pfstr;
+		prooffun := (fun dl ->
+                  match dl with
+                    d0::dr ->
+                     let (dl1,dl2) = split_list (nsubs-1) dr in
+                     let endpos = max_opt_pos_l (List.map (fun (ep,_) -> ep) (d0::dl1)) in
+                     let d = apff (d0::List.rev dl1) in
+                     postprobs "rewrite" startpos endpos claimtm cxtm cxpf d;
+                     currprooffun ((endpos,d)::dl2)
+                  | [] -> raise (Failure("proof reconstruction problem")));
+                begin
+                  match subclaims with
+                  | [] -> pfstate := pfstr
+                  | [subclaim1] -> pfstate := PfStateGoal(Some(!lineno,!charno),subclaim1,cxtm,cxpf)::pfstr
+                  | subclaim1::subclaimsr ->
+		     pfstate := PfStateGoal(Some(!lineno,!charno),subclaim1,cxtm,cxpf)::(List.map (fun c -> PfStateGoal(None,c,cxtm,cxpf)) subclaimsr) @ pfstr;
+                end;
 		if !verbosity > 19 then (Printf.printf "here nach apply\nLength of pfstate stack: %d\n" (List.length !pfstate); flush stdout);
 	      with Not_found ->
 		raise (Failure("rewrite tactic failed"))
@@ -2309,17 +2898,22 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
 	    try
 	      if !verbosity > 19 then (Printf.printf "Qed start\n"; flush stdout);
 	      if not (Hashtbl.mem indexknowns gphv) then Hashtbl.add indexknowns gphv ();
-	      if not (Hashtbl.mem ownedprop pfggphv) then Hashtbl.add ownedprop pfggphv ();
+              if not (Hashtbl.mem ownedprop pfggphv) then Hashtbl.add ownedprop pfggphv ();
 	      activate_special_knowns gphv;
 	      if !pfgtheory = Egal then megaauto_set_known gphv;
-              if fofp() && i = 0 && not (Hashtbl.mem fofskip gphv) then (try fofsg := Printf.sprintf "fof(%s,axiom,%s). %% %s" (tptpize_name thmname) (fof_prop_str gpgtm []) gphv::!fofsg with NotFO -> ());
+              if fofp() && i = 0 && not (Hashtbl.mem fofskip gphv) then
+                begin
+                  try
+                    fofsg := ("known",gphv,thmname,Printf.sprintf "fof(%s,axiom,%s). %% %s" (tptpize_name thmname) (fof_prop_str gpgtm [] 0) gphv)::!fofsg;
+                  with NotFO -> ()
+                end;
               if th0p() && i = 0 && not (Hashtbl.mem th0skip gphv) then
                 begin
                   if not !bushy || Hashtbl.mem bushykdeps gphv then
                     if !th0ps1 then
                       (th0sgps1 := (Some(tm_deps gpgtm),Printf.sprintf "thf(%s,axiom,%s). %% %s" (tptpize_name thmname) (th0_str gpgtm []) gphv)::!th0sgps1)
                     else
-                      (th0sg := Printf.sprintf "thf(%s,axiom,%s). %% %s" (tptpize_name thmname) (th0_str gpgtm []) gphv::!th0sg)
+                      (th0sg := ("known",gphv,thmname,Printf.sprintf "thf(%s,axiom,%s). %% %s" (tptpize_name thmname) (th0_str gpgtm []) gphv)::!th0sg)
                 end;
               begin
                 match !sexprallsubgoals with
@@ -2417,14 +3011,19 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
 	secstack := List.map (fun (y,f,atl,apl,st,sp) -> (y,f,atl,apl,st,(thmname,apl (Known(gphv)))::sp)) !secstack;
 	proving := None;
         List.iter admitpfstateatp !pfstate;
-        if fofp() && i = 0 && not (Hashtbl.mem fofskip gphv) then (try fofsg := Printf.sprintf "fof(%s,axiom,%s). %% %s" (tptpize_name thmname) (fof_prop_str gpgtm []) gphv::!fofsg with NotFO -> ());
+        if fofp() && i = 0 && not (Hashtbl.mem fofskip gphv) then
+          begin
+            try
+              fofsg := ("known",gphv,thmname,Printf.sprintf "fof(%s,axiom,%s). %% %s" (tptpize_name thmname) (fof_prop_str gpgtm [] 0) gphv)::!fofsg;
+            with NotFO -> ()
+          end;
         if th0p() && i = 0 && not (Hashtbl.mem th0skip gphv) then
           begin
             if not !bushy || Hashtbl.mem bushykdeps gphv then
               if !th0ps1 then
                 (th0sgps1 := (Some(tm_deps gpgtm),Printf.sprintf "thf(%s,axiom,%s). %% %s" (tptpize_name thmname) (th0_str gpgtm []) gphv)::!th0sgps1)
               else
-                (th0sg := Printf.sprintf "thf(%s,axiom,%s). %% %s" (tptpize_name thmname) (th0_str gpgtm []) gphv::!th0sg)
+                (th0sg := ("known",gphv,thmname,Printf.sprintf "thf(%s,axiom,%s). %% %s" (tptpize_name thmname) (th0_str gpgtm []) gphv)::!th0sg)
           end;
 	pfstate := [];
 	treasure := None;
@@ -2450,12 +3049,102 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
 	   prooffun := (fun _ -> raise AdmittedPf)
 	| [] -> raise (Failure("No goal to admit"))
       end
+  | Aby(xl) ->
+      begin
+	match !pfstate with
+        | (PfStateGoal(startpos,claimtm,cxtm,cxpf) as pfst)::pfstr ->
+           List.iter
+             (fun x ->
+               try
+                 ignore (pfproplookup cxpf x)
+               with Not_found ->
+                     try
+                       ignore (List.assoc x !sigpf !ctxtp cxtm cxpf)
+                     with Not_found ->
+	                   raise (Failure("Unknown proof " ^ x ^ " -- it might be a term in a position where a proof is expected")))
+             xl;
+           if !createabyprobs then
+             begin
+               begin
+                 match !fof with
+                 | None -> ()
+                 | Some(c) ->
+                    try
+                      let z = fof_prop_str claimtm (tptpizecxtm cxtm) 0 in (** only if the conclusion is FO **)
+                      let conjn = Printf.sprintf "%s_%d_%d" c !lineno !charno in
+                      Buffer.clear sb;
+                      let xfound : (string,unit) Hashtbl.t = Hashtbl.create 10 in
+                      List.iter
+                        (fun (cl,h,x,a) ->
+                          if cl = "type" || cl = "def" && not (Hashtbl.mem sigdelta_opaque h) || cl = "known" && List.mem x xl then
+                            begin
+                              Hashtbl.add xfound x ();
+                              Buffer.add_string sb (Printf.sprintf "%s\n" a)
+                            end)
+                        (List.rev !fofsg);
+                      List.iter
+                        (fun (x,p) ->
+                          if List.mem x xl then
+                            let a = fof_prop_str p (tptpizecxtm cxtm) 0 in
+                            Hashtbl.add xfound x ();
+                            Buffer.add_string sb (Printf.sprintf "fof(%s,axiom,%s).\n" (tptpize_name x) a))
+                        cxpf;
+                      Buffer.add_string sb (Printf.sprintf "fof(conj_%s,conjecture,%s).\n" conjn z);
+                      List.iter
+                        (fun x -> if not (Hashtbl.mem xfound x) then raise NotFO)
+                        xl;
+                      let fn = Printf.sprintf "%s.%d.%d.fof.p" c !lineno !charno in
+                      let ch = open_out fn in
+                      Printf.fprintf ch "%s" (Buffer.contents sb);
+                      close_out ch
+                    with NotFO -> ()
+               end;
+               begin
+                 match !th0 with
+                 | None -> ()
+                 | Some(c) ->
+                    let fn = Printf.sprintf "%s.%d.%d.th0.p" c !lineno !charno in
+                    let conjn = Printf.sprintf "%s_%d_%d" c !lineno !charno in
+                    let ch = open_out fn in
+                    List.iter
+                      (fun (cl,h,x,a) ->
+                        if cl = "type" || cl = "def" && not (Hashtbl.mem sigdelta_opaque h) || cl = "known" && List.mem x xl then
+                          Printf.fprintf ch "%s\n" a)
+                      (List.rev !th0sg);
+                    let rec th0_cx cxtm =
+                      match cxtm with
+                      | [] -> ()
+                      | (x,(a,d))::cxtmr ->
+                         th0_cx cxtmr;
+                         Printf.fprintf ch "thf(%s_tp,type,(%s : %s)).\n" (tptpize_name x) (tptpize_name x) (th0_stp_str a);
+                         match d with
+                         | Some(d) ->
+                            Printf.fprintf ch "thf(%s_def,definition,(%s = %s)).\n" (tptpize_name x) (tptpize_name x) (th0_str d (tptpizecxtm cxtmr))
+                         | None -> ()
+                    in
+                    th0_cx cxtm;
+                    List.iter
+                      (fun (x,p) ->
+                        if List.mem x xl then
+                          let a = th0_str p (tptpizecxtm cxtm) in
+                          Printf.fprintf ch "thf(%s,axiom,%s).\n" (tptpize_name x) a)
+                      cxpf;
+                    Printf.fprintf ch "thf(conj_%s,conjecture,%s).\n" conjn (th0_str claimtm (tptpizecxtm cxtm));
+                    close_out ch
+               end;
+             end;
+           admitpfstateatp pfst;
+	   pfstate := pfstr;
+	   admits := true;
+	   prooffun := (fun _ -> raise AdmittedPf)
+	| _ -> raise (Failure("No goal to aby"))
+      end
   | SpecialTac(x,[]) when x = "distinct" ->
      begin
        if !pfgtheory = HOAS then
          begin
            match !pfstate with
-           | PfStateGoal(claimtm,cxtm,cxpf)::pfstr ->
+           | PfStateGoal(startpos,claimtm,cxtm,cxpf)::pfstr ->
               begin
                 let pair_p h = h = "d58762d200971dcc7f1850726d9f2328403127deeba124fc3ba2d2d9f7c3cb8c" in
                 let bind_p h = h = "73c9efe869770ab42f7cde0b33fe26bbc3e2bd157dad141c0c27d1e7348d60f5" in
@@ -2540,8 +3229,9 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
                 in
                 let distinct_hoas m n =
                   let d = PLam(Ap(Ap(TpAp(TmH("5a6af35fb6d6bea477dd0f822b8e01ca0d57cc50dfd41744307bc94597fdaa4a"),Set),m),n),distinct_hoas_2 m n (Hyp(0))) in
+                  let endpos = Some(!lineno,!charno) in
                   let currprooffun = !prooffun in
-                  prooffun := (fun dl -> currprooffun (d::dl));
+                  prooffun := (fun dl -> currprooffun ((endpos,d)::dl));
                   pfstate := pfstr
                 in
                 match claimtm with
@@ -2558,7 +3248,7 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
        else if !pfgtheory = Egal then
          begin
            match !pfstate with
-           | PfStateGoal(claimtm,cxtm,cxpf)::pfstr ->
+           | PfStateGoal(startpos,claimtm,cxtm,cxpf)::pfstr ->
               begin
                 let empty = "e2a83319facad3a3d8ff453f4ef821d9da495e56a623695546bb7d7ac333f3fe" in
                 let ordsucc = "9db634daee7fc36315ddda5f5f694934869921e9c5f55e8b25c91c0a07c5cbec" in
@@ -2877,8 +3567,9 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
                 in
                 let distinct_egal m n =
                   let d = distinct_egal_1 m n in
+                  let endpos = Some(!lineno,!charno) in
                   let currprooffun = !prooffun in
-                  prooffun := (fun dl -> currprooffun (d::dl));
+                  prooffun := (fun dl -> currprooffun ((endpos,d)::dl));
                   pfstate := pfstr
                 in
                 match claimtm with
@@ -2898,7 +3589,7 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
   | SpecialTac(x,[]) when x = "reflexivity" ->
      begin
        match !pfstate with
-       | PfStateGoal(claimtm,cxtm,cxpf)::pfstr ->
+       | PfStateGoal(startpos,claimtm,cxtm,cxpf)::pfstr ->
           begin
             match claimtm with
             | Ap(Ap(TpAp(TmH(h),a),m),n) when h = "5a6af35fb6d6bea477dd0f822b8e01ca0d57cc50dfd41744307bc94597fdaa4a" ->
@@ -2907,8 +3598,9 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
                  | Some(dl) ->
                     deltaset := dl;
                     let reflp = TLam(Ar(a,Ar(a,Prop)),PLam(Ap(Ap(DB(0),tmshift 0 1 m),tmshift 0 1 n),Hyp(0))) in
+                    let endpos = Some(!lineno,!charno) in
 		    let currprooffun = !prooffun in
-                    prooffun := (fun dl -> currprooffun (reflp::dl));
+                    prooffun := (fun dl -> currprooffun ((endpos,reflp)::dl));
                     pfstate := pfstr
                  | None -> raise (Failure("reflexivity failed"))
                end
@@ -2919,14 +3611,14 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
   | SpecialTac(x,[]) when x = "symmetry" ->
      begin
        match !pfstate with
-       | PfStateGoal(claimtm,cxtm,cxpf)::pfstr ->
+       | PfStateGoal(startpos,claimtm,cxtm,cxpf)::pfstr ->
           begin
             match claimtm with
             | Ap(Ap(TpAp(TmH(h),a),m),n) when h = "5a6af35fb6d6bea477dd0f822b8e01ca0d57cc50dfd41744307bc94597fdaa4a" ->
                begin
 		 let currprooffun = !prooffun in
-                 prooffun := (fun dl -> match dl with d::dr -> currprooffun (TLam(Ar(a,Ar(a,Prop)),PTmAp(pftmshift 0 1 d,Lam(a,Lam(a,Ap(Ap(DB(2),DB(0)),DB(1))))))::dr) | [] -> raise (Failure "no pf of symmetric eqn"));
-                 pfstate := PfStateGoal(Ap(Ap(TpAp(TmH(h),a),n),m),cxtm,cxpf)::pfstr;
+                 prooffun := (fun dl -> match dl with (endpos,d)::dr -> currprooffun ((endpos,TLam(Ar(a,Ar(a,Prop)),PTmAp(pftmshift 0 1 d,Lam(a,Lam(a,Ap(Ap(DB(2),DB(0)),DB(1)))))))::dr) | [] -> raise (Failure "no pf of symmetric eqn"));
+                 pfstate := PfStateGoal(startpos,Ap(Ap(TpAp(TmH(h),a),n),m),cxtm,cxpf)::pfstr;
                end
             | _ -> raise (Failure("symmetry tactic cannot be used when there is not an equation"))
           end
@@ -2935,7 +3627,7 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
   | SpecialTac(x,(a2::al)) when x = "transitivity" ->
      begin
        match !pfstate with
-       | PfStateGoal(claimtm,cxtm,cxpf)::pfstr ->
+       | PfStateGoal(startpos,claimtm,cxtm,cxpf)::pfstr ->
           begin
             match claimtm with
             | Ap(Ap(TpAp(TmH(h),a),lhs),rhs) when h = "5a6af35fb6d6bea477dd0f822b8e01ca0d57cc50dfd41744307bc94597fdaa4a" ->
@@ -2949,11 +3641,11 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
 		let rec transitivity_tac lhs al =
 		  match al with
 		  | [] ->
-		      let pfst2 = PfStateGoal(Ap(Ap(q,lhs),rhs),cxtm,cxpf)::pfstr in
+		      let pfst2 = PfStateGoal(startpos,Ap(Ap(q,lhs),rhs),cxtm,cxpf)::pfstr in
 		      let pfun2 dl =
 			match dl with
-			| d1::dr -> (PPfAp(PTmAp(pfshift 0 1 (pftmshift 0 1 d1),Lam(a,DB(1))),Hyp(0)),dr)
-			| _ -> raise (Failure "mssing proof of eqn in transitivity")
+			| (endpos,d1)::dr -> (PPfAp(PTmAp(pfshift 0 1 (pftmshift 0 1 d1),Lam(a,DB(1))),Hyp(0)),dr)
+			| _ -> raise (Failure "missing proof of eqn in transitivity")
 		      in
 		      (pfun2,pfst2)
 		  | a2::ar ->
@@ -2962,18 +3654,19 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
 		      let (pfun2,pfst2) = transitivity_tac m2 ar in
 		      let pfun3 dl =
 			match dl with
-			  d1::dr ->
-			    let (d2,dr2) = pfun2 dr in
-			    (PPfAp(PTmAp(pfshift 0 1 (pftmshift 0 1 d1),Lam(a,DB(1))),d2),dr2)
+			  (endpos1,d1)::dr ->
+			   let (d2,dr2) = pfun2 dr in
+			   (PPfAp(PTmAp(pfshift 0 1 (pftmshift 0 1 d1),Lam(a,DB(1))),d2),dr2)
 			| _ -> raise (Failure "mssing proof of eqn in transitivity")
 		      in
-		      let pfst3 = PfStateGoal(Ap(Ap(q,lhs),m2),cxtm,cxpf)::pfst2 in
+		      let pfst3 = PfStateGoal(startpos,Ap(Ap(q,lhs),m2),cxtm,cxpf)::pfst2 in
 		      (pfun3,pfst3)
 		in
 		let (pfun2,pfst2) = transitivity_tac lhs (a2::al) in
+                let endpos = Some(!lineno,!charno) in
 		let pfun3 dl =
 		  let (d,dr) = pfun2 dl in
-		  pfun (PPfAp(PTmAp(PTmAp(rleib_imp_sleib,lhs),rhs),TLam(Ar(a,Prop),PLam(prhs,d)))::dr)
+		  pfun ((endpos,PPfAp(PTmAp(PTmAp(rleib_imp_sleib,lhs),rhs),TLam(Ar(a,Prop),PLam(prhs,d))))::dr)
 		in
 		prooffun := pfun3;
 		pfstate := pfst2
@@ -2984,7 +3677,7 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
   | SpecialTac(x,[]) when x = "f_equal" ->
      begin
        match !pfstate with
-       | PfStateGoal(claimtm,cxtm,cxpf)::pfstr ->
+       | PfStateGoal(startpos,claimtm,cxtm,cxpf)::pfstr ->
           begin
             match claimtm with
             | Ap(Ap(TpAp(TmH(h),a),lhs),rhs) when h = "5a6af35fb6d6bea477dd0f822b8e01ca0d57cc50dfd41744307bc94597fdaa4a" ->
@@ -3021,20 +3714,21 @@ let evaluate_pftac_1 pitem thmname i gpgtm gphv pfggphv =
 		    let (pfun2,pfst2) = f_equal_tac (tmshift 0 (-4) (f (tmshift 0 4 n))) mnr in
 		    let pfun3 dl =
 		      match dl with
-		      | d1::dr ->
+		      | (endpos,d1)::dr ->
 			 let (d2,dr2) = pfun2 dr in
                          let d1a = pfshift 0 1 (pftmshift 0 1 d1) in
                          let d1f = lift_eqn_pf d1a f in
 			 (PPfAp(PTmAp(d1f,Lam(a,DB(1))),d2),dr2)
 		      | _ -> raise (Failure "mssing proof of eqn in f_equal")
 		    in
-		    let pfst3 = PfStateGoal(Ap(Ap(q,m),n),cxtm,cxpf)::pfst2 in
+		    let pfst3 = PfStateGoal(startpos,Ap(Ap(q,m),n),cxtm,cxpf)::pfst2 in
 		    (pfun3,pfst3)
 	       in
 	       let (pfun2,pfst2) = f_equal_tac lhs mnl in
+               let endpos = Some(!lineno,!charno) in
 	       let pfun3 dl =
 		 let (d,dr) = pfun2 dl in
-		 pfun (PPfAp(PTmAp(PTmAp(rleib_imp_sleib,lhs),rhs),TLam(Ar(a,Prop),PLam(prhs,d)))::dr)
+		 pfun ((endpos,PPfAp(PTmAp(PTmAp(rleib_imp_sleib,lhs),rhs),TLam(Ar(a,Prop),PLam(prhs,d))))::dr)
 	       in
 	       prooffun := pfun3;
 	       pfstate := pfst2
@@ -3050,7 +3744,7 @@ let rec evaluate_pftac_2 () =
   | PfStateSep(j,false)::pfstr ->
       begin
 	match !html with
-	| Some hc -> output_pftacitem_html hc (PfStruct(j)) sigtmh sigknh 3
+	| Some hc -> output_pftacitem_html ((List.map (fun (x,_) -> x) !ctxpf) @ (List.map (fun (x,_) -> x) !ctxtm) @ !ctxtp) hc (PfStruct(j)) sigtmh sigknh 3
 	| None -> ()
       end;
       begin
@@ -3058,7 +3752,7 @@ let rec evaluate_pftac_2 () =
 	| Some hc -> output_pftacitem_latex hc (PfStruct(j)) sigtmh sigknh 3
 	| None -> ()
       end;
-      pfstate := pfstr;
+      pfstate := pos_fst_pfst pfstr;
       evaluate_pftac_2 ()
   | _ -> ()
 
@@ -3069,7 +3763,7 @@ let evaluate_pftac pitem thmname i gpgtm gphv pfggphv =
     | None -> ()
     | Some(seaspre,seasincl,_) ->
        match !pfstate with
-       | PfStateGoal(atm,ctxtm,ctxpf)::_ ->
+       | PfStateGoal(startpos,atm,ctxtm,ctxpf)::_ ->
           let f = open_out (Printf.sprintf "%s_%d_%d.lisp" seaspre !lineno !charno) in
           if not (seasincl = "") then Printf.fprintf f "(INCLUDE \"%s\")\n" seasincl;
           List.iter (fun (y,q) -> Printf.fprintf f "(HYP \"%s\" %s)\n" y (tm_to_sexpr q)) ctxpf;
@@ -3093,7 +3787,7 @@ let evaluate_pftac pitem thmname i gpgtm gphv pfggphv =
 	    | Some(c) -> buffer_to_line_char c pftext inchanline inchanchar !lineno !charno
 	    | None -> ()
 	  end; *)
-	output_pftacitem_html hc pitem sigtmh sigknh !laststructaction
+	output_pftacitem_html ((List.map (fun (x,_) -> x) !ctxpf) @ (List.map (fun (x,_) -> x) !ctxtm) @ !ctxtp) hc pitem sigtmh sigknh !laststructaction
     | None -> ()
   end;
   begin
@@ -3310,11 +4004,11 @@ let mgcheck c =
       if !verbosity > 59 then (Printf.printf "Main Loop Start\n"; flush stdout);
       match !proving with
       | None ->
-	  let (ditem,tr) = parse_docitem !tl in
-	  tl := tr;
-	  evaluate_docitem ditem
-      | Some (thmname,i,gpgtm,gphv,pfggphv) -> (*** reading a proof ***)
-	  let (pitem,tr) = parse_pftacitem !tl in
+	            let (ditem,tr) = parse_docitem !tl in                                                                                                                                                                   
+	            tl := tr;
+	            if !dumpsexpr then Sexprexport.print_docitem ditem;
+	            evaluate_docitem ditem                                                                                                                                                                                  
+	        | Some (thmname,i,gpgtm,gphv,pfggphv) -> (*** reading a proof ***)	  let (pitem,tr) = parse_pftacitem !tl in
 	  tl := tr;
 	  evaluate_pftac pitem thmname i gpgtm gphv pfggphv
     done
@@ -3645,6 +4339,11 @@ let preset_mizar_index () =
   Hashtbl.add indextms "f55f90f052decfc17a366f12be0ad237becf63db26be5d163bf4594af99f943a" (Ar(Set,Ar(Set,Set)));
   Hashtbl.add indextms "844774016d959cff921a3292054b30b52f175032308aa11e418cb73f5fef3d54" (Ar(Set,Set))
 
+let preset_setmm_index () =
+  Hashtbl.clear indextms;
+  Hashtbl.clear indexknowns;
+  ()
+
 let preset_hoas_index () =
   Hashtbl.clear indextms;
   Hashtbl.clear indexknowns;
@@ -3722,50 +4421,7 @@ let _ =
                 let hc = open_out (Sys.argv.(!j)) in
 		html := Some(hc);
                 Printf.fprintf hc "<html><head>\n";
-                Printf.fprintf hc "<style>\n";
-                Printf.fprintf hc ".paramdecl {\n";
-                Printf.fprintf hc " margin-top: 3px;\n";
-                Printf.fprintf hc " margin-bottom: 3px;\n";
-                Printf.fprintf hc "}\n";
-                Printf.fprintf hc ".defdecl {\n";
-                Printf.fprintf hc " margin-top: 3px;\n";
-                Printf.fprintf hc " margin-bottom: 3px;\n";
-                Printf.fprintf hc "}\n";
-                Printf.fprintf hc ".axdecl {\n";
-                Printf.fprintf hc " margin-top: 3px;\n";
-                Printf.fprintf hc " margin-bottom: 3px;\n";
-                Printf.fprintf hc "}\n";
-                Printf.fprintf hc ".thmdecl {\n";
-                Printf.fprintf hc " margin-top: 3px;\n";
-                Printf.fprintf hc " margin-bottom: 3px;\n";
-                Printf.fprintf hc "}\n";
-                Printf.fprintf hc ".proof {\n";
-                Printf.fprintf hc " border-style: solid;\n";
-                Printf.fprintf hc " border-width: 2px;\n";
-                Printf.fprintf hc " padding: 1px;\n";
-                Printf.fprintf hc " margin: 1px;\n";
-                Printf.fprintf hc "}\n";
-                Printf.fprintf hc ".subproof {\n";
-                Printf.fprintf hc " border-style: solid;\n";
-                Printf.fprintf hc " border-width: 1px;\n";
-                Printf.fprintf hc " padding: 1px;\n";
-                Printf.fprintf hc " margin: 1px;\n";
-                Printf.fprintf hc "}\n";
-                Printf.fprintf hc ".section {\n";
-                Printf.fprintf hc " border-style: solid;\n";
-                Printf.fprintf hc " border-width: 2px;\n";
-                Printf.fprintf hc " padding: 1px;\n";
-                Printf.fprintf hc " margin: 1px;\n";
-                Printf.fprintf hc "}\n";
-                Printf.fprintf hc ".sectionbegin {\n";
-                Printf.fprintf hc " text-align: center;\n";
-                Printf.fprintf hc " text-decoration: underline;\n";
-                Printf.fprintf hc "}\n";
-                Printf.fprintf hc ".sectionend {\n";
-                Printf.fprintf hc " text-align: center;\n";
-                Printf.fprintf hc " text-decoration: underline;\n";
-                Printf.fprintf hc "}\n";
-                Printf.fprintf hc "</style>\n";
+                Printf.fprintf hc "<link rel=\"stylesheet\" href=\"mg.css\">\n";
                 Printf.fprintf hc "</head><body>\n";
 	      end
 	    else
@@ -3795,6 +4451,52 @@ let _ =
 	    else
 	      raise (Failure("Expected -th0 <fileprefix>"))
           end
+        else if Sys.argv.(!j) = "-createabyprobs" then
+          begin
+	    if !j < i-2 then
+	      begin
+		incr j;
+                createabyprobs := true;
+                th0 := Some(Sys.argv.(!j));
+                fof := Some(Sys.argv.(!j))
+	      end
+	    else
+	      raise (Failure("Expected -createabyprobs <fileprefix>"))
+          end
+        else if Sys.argv.(!j) = "-fofallsubgoals" then
+          begin
+	    if !j < i-2 then
+	      begin
+		incr j;
+                fof := Some(Sys.argv.(!j));
+                fofallsubgoals := true;
+	      end
+	    else
+	      raise (Failure("Expected -fofallsubgoals <fileprefix>"))
+          end
+        else if Sys.argv.(!j) = "-fofpostsubgoals" then
+          begin
+	    if !j < i-2 then
+	      begin
+		incr j;
+                fof := Some(Sys.argv.(!j));
+                fofpostsubgoals := true;
+	      end
+	    else
+	      raise (Failure("Expected -fofpostsubgoals <fileprefix>"))
+          end
+        else if Sys.argv.(!j) = "-th0single" then
+          begin
+	    if !j < i-4 then
+	      begin
+		incr j;
+                th0 := Some(Sys.argv.(!j));
+                th0singlesubgoal := Some(int_of_string (Sys.argv.(!j+1)),int_of_string (Sys.argv.(!j+2)));
+                j := !j + 2;
+	      end
+	    else
+	      raise (Failure("Expected -th0single <fileprefix> <lineno> <charno>"))
+          end
         else if Sys.argv.(!j) = "-th0allsubgoals" then
           begin
 	    if !j < i-2 then
@@ -3806,9 +4508,26 @@ let _ =
 	    else
 	      raise (Failure("Expected -th0allsubgoals <fileprefix>"))
           end
+        else if Sys.argv.(!j) = "-th0postsubgoals" then
+          begin
+	    if !j < i-2 then
+	      begin
+		incr j;
+                th0 := Some(Sys.argv.(!j));
+                th0postsubgoals := true;
+	      end
+	    else
+	      raise (Failure("Expected -th0postsubgoals <fileprefix>"))
+          end
         else if Sys.argv.(!j) = "-sexprinfo" then
           begin
+            incr j;
             sexprinfo := true
+          end
+        else if Sys.argv.(!j) = "-dump-sexpr" then
+          begin
+            incr j;
+            dumpsexpr := true
           end
         else if Sys.argv.(!j) = "-reportbushydeps" then
           begin
@@ -3853,13 +4572,13 @@ let _ =
           end
         else if Sys.argv.(!j) = "-sexprallsubgoals" then
           begin
-	    if !j < i-2 then
-	      begin
-		incr j;
+            if !j < i-2 then
+              begin
+                incr j;
                 sexprallsubgoals := Some(Sys.argv.(!j),"",0)
-	      end
-	    else
-	      raise (Failure("Expected -sexprallsubgoals <fileprefix>"))
+              end
+            else
+              raise (Failure("Expected -sexprallsubgoals <fileprefix>"))
           end
 	else if Sys.argv.(!j) = "-s" then
 	  begin
@@ -3901,6 +4620,11 @@ let _ =
             pfgtheory := Mizar;
             preset_mizar_index();
           end
+        else if Sys.argv.(!j) = "-setmm" then
+          begin
+            pfgtheory := SetMM;
+            preset_setmm_index();
+          end
         else if Sys.argv.(!j) = "-hoas" then
           begin
             pfgtheory := HOAS;
@@ -3909,6 +4633,10 @@ let _ =
 	else if Sys.argv.(!j) = "-pfg" then
 	  begin
 	    pfgout := true;
+	  end
+	else if Sys.argv.(!j) = "-pfgsummary" then
+	  begin
+	    pfgsummary := true;
 	  end
 	else if Sys.argv.(!j) = "-indout" then
 	  begin
@@ -4037,6 +4765,16 @@ let _ =
 	    else
 	      raise (Failure("Expected -v <verbositynumber>"))
 	  end
+	else if Sys.argv.(!j) = "-explorerurl" then
+	  begin
+	    if !j < i-2 then
+	      begin
+		incr j;
+		explorerurl := Sys.argv.(!j);
+	      end
+	    else
+	      raise (Failure("Expected -v <verbositynumber>"))
+	  end
 	else if !includingsigfile then
 	  let c = open_in (Sys.argv.(!j)) in
           begin
@@ -4080,6 +4818,7 @@ let _ =
               | Egal -> Printf.printf "Document 29c988c5e6c620410ef4e61bcfcbe4213c77013974af40759d8b732c07d61967\nBase set\n"
               | Mizar -> Printf.printf "Document 5ab3df7b0b4ef20889de0517a318df8746940971ad9b2021e54c820eb9e74dce\nBase set\n"
               | HOAS -> Printf.printf "Document 513140056e2032628f48d11e221efe29892e9a03a661d3b691793524a5176ede\nBase syn\n"
+              | SetMM -> Printf.printf "Document 85ecfdcf26657b94532af5af2393c6945cee05c4aabccb8a819f793a7dbc4acf\nBase set\n"
             end;
             List.iter
               (fun i ->

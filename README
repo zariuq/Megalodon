@@ -1,4 +1,4 @@
-(* Copyright (c) 2020-2023 CIIRC (Czech Institute of Informatics, Robotics and Cybernetics) / CTU (Czech Technical University) *)
+(* Copyright (c) 2020-2025 CIIRC (Czech Institute of Informatics, Robotics and Cybernetics) / CTU (Czech Technical University) *)
 
 Megalodon is an open source interactive theorem prover and proof checker.
 Its main application is to create Proofgold documents (proofgold.org).
